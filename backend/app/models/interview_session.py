@@ -19,6 +19,9 @@ class InterviewSession(Base, BaseModelMixin):
     resume_id: Mapped[int | None] = mapped_column(
         ForeignKey("resume.id", ondelete="SET NULL"), nullable=True
     )
+    position_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_position.id", ondelete="SET NULL"), nullable=True
+    )
     target_company: Mapped[str | None] = mapped_column(String(100), nullable=True)
     target_position: Mapped[str | None] = mapped_column(String(100), nullable=True)
     job_description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -31,6 +34,7 @@ class InterviewSession(Base, BaseModelMixin):
 
     user = relationship("User", back_populates="interview_sessions")
     resume = relationship("Resume", back_populates="interview_sessions")
+    position = relationship("JobPosition", back_populates="interview_sessions")
     messages = relationship(
         "InterviewMessage", back_populates="session", cascade="all, delete-orphan"
     )

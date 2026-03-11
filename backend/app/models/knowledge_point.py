@@ -8,6 +8,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base, BaseModelMixin
 
 
+class KnowledgeScope(str, enum.Enum):
+    GENERAL = "GENERAL"
+    POSITION = "POSITION"
+
+
 class KnowledgePointType(str, enum.Enum):
     KNOWLEDGE = "KNOWLEDGE"
     QUESTION = "QUESTION"
@@ -24,6 +29,11 @@ class KnowledgePoint(Base, BaseModelMixin):
 
     subject: Mapped[str] = mapped_column(String(50), nullable=False)
     category: Mapped[str] = mapped_column(String(100), nullable=False)
+    scope: Mapped[KnowledgeScope] = mapped_column(
+        Enum(KnowledgeScope, name="knowledge_scope", native_enum=False),
+        default=KnowledgeScope.GENERAL,
+        nullable=False,
+    )
     type: Mapped[KnowledgePointType] = mapped_column(
         Enum(KnowledgePointType, name="knowledge_point_type", native_enum=False),
         nullable=False,
@@ -42,4 +52,7 @@ class KnowledgePoint(Base, BaseModelMixin):
 
     wrong_questions = relationship(
         "WrongQuestion", back_populates="knowledge_point", cascade="all, delete-orphan"
+    )
+    position_links = relationship(
+        "PositionKnowledge", back_populates="knowledge_point", cascade="all, delete-orphan"
     )

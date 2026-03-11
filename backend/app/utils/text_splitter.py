@@ -51,15 +51,9 @@ def _decode_text(content: bytes) -> str:
 
 
 def _extract_pdf_text(content: bytes) -> str:
-    import pdfplumber
+    from app.utils.file_parser import _extract_pdf_text as _full_extract
 
-    pages_text: list[str] = []
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                pages_text.append(text)
-    return "\n\n".join(pages_text)
+    return _full_extract(content)
 
 
 # ── Markdown section splitter ─────────────────────────────
