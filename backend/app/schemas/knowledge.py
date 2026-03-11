@@ -65,3 +65,10 @@ class ReferenceItem(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     references: list[ReferenceItem]
+
+
+# ── Upload ─────────────────────────────────────────────────
+class UploadResponse(BaseModel):
+    ingested_count: int
+    ids: list[int]
+    source_file: str

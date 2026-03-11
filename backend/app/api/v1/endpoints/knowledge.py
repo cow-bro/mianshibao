@@ -1,9 +1,10 @@
-"""Knowledge RAG endpoints: ingest, search, ask."""
+"""Knowledge RAG endpoints: ingest, search, ask, upload."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Form, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_active_user, get_db
+from app.core.exceptions import AppException
 from app.core.response import success_response
 from app.models.user import User
 from app.schemas.knowledge import AskRequest, IngestRequest, SearchRequest
@@ -12,6 +13,9 @@ from app.services.knowledge_service import KnowledgeService
 router = APIRouter()
 
 _service = KnowledgeService()
+
+_ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md", ".markdown"}
+_MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
 @router.post("/ingest")
@@ -62,3 +66,35 @@ async def ask_knowledge(
     """RAG Q&A: retrieve context and generate a grounded answer."""
     result = await _service.ask_knowledge_base(db, request.question)
     return success_response(data=result)
+
+
+@router.post("/upload")
+async def upload_knowledge_document(
+    file: UploadFile,
+    subject: str = Form("Computer Science"),
+    category: str = Form("General"),
+    difficulty: str = Form("MEDIUM"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_active_user),
+):
+    """Upload a PDF/TXT/MD document — auto-chunk, embed, and store."""
+    filename = file.filename or "document.txt"
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if f".{suffix}" not in _ALLOWED_EXTENSIONS:
+        raise AppException(
+            f"unsupported file type .{suffix}, allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+            code=3005,
+        )
+
+    content = await file.read()
+    if not content:
+        raise AppException("empty file", code=3005)
+    if len(content) > _MAX_UPLOAD_SIZE:
+        raise AppException("file exceeds 20 MB limit", code=3005)
+
+    ids = await _service.ingest_document(
+        db, filename, content, subject, category, difficulty
+    )
+    return success_response(
+        data={"ingested_count": len(ids), "ids": ids, "source_file": filename}
+    )

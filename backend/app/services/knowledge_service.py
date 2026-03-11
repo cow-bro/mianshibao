@@ -12,6 +12,13 @@ from app.core.exceptions import AppException
 from app.models.knowledge_point import DifficultyLevel, KnowledgePoint, KnowledgePointType
 from app.providers.embedding import EmbeddingProvider
 from app.providers.llm_factory import LLMService
+from app.providers.reranker import RerankerProvider
+from app.utils.text_splitter import (
+    RecursiveTextSplitter,
+    extract_text_from_file,
+    segment_chinese,
+    split_markdown_sections,
+)
 
 
 class KnowledgeService:
@@ -19,6 +26,7 @@ class KnowledgeService:
         self.settings = get_settings()
         self.embedder = EmbeddingProvider()
         self.llm_service = LLMService()
+        self.reranker = RerankerProvider()
         self._rag_prompt = self._load_rag_prompt()
 
     # ── RAG prompt ─────────────────────────────────────────
@@ -65,18 +73,22 @@ class KnowledgeService:
             await db.flush()
             created_ids.append(kp.id)
 
-        # Populate tsvector via SQL (handles Chinese via 'simple' config)
+        # Populate tsvector with jieba-segmented text for Chinese FTS
         if created_ids:
-            await db.execute(
-                text(
-                    "UPDATE knowledge_point "
-                    "SET search_vector = to_tsvector('simple', "
-                    "  coalesce(title,'') || ' ' || coalesce(content,'') "
-                    "  || ' ' || coalesce(array_to_string(tags,' '),'')) "
-                    "WHERE id = ANY(:ids)"
-                ),
-                {"ids": created_ids},
-            )
+            for kp_id, card in zip(created_ids, cards):
+                raw = (
+                    f"{card.get('title', '')} {card.get('content', '')} "
+                    f"{' '.join(card.get('tags', []))}"
+                )
+                segmented = segment_chinese(raw)
+                await db.execute(
+                    text(
+                        "UPDATE knowledge_point "
+                        "SET search_vector = to_tsvector('simple', :seg_text) "
+                        "WHERE id = :kp_id"
+                    ),
+                    {"seg_text": segmented, "kp_id": kp_id},
+                )
 
         await db.commit()
         return created_ids
@@ -130,6 +142,7 @@ class KnowledgeService:
     async def _keyword_search(
         self, db: AsyncSession, query: str, top_k: int
     ) -> list[dict]:
+        segmented_query = segment_chinese(query)
         stmt = text(
             "SELECT id, title, content, answer, subject, category, "
             "       difficulty, tags, source_company, "
@@ -139,7 +152,7 @@ class KnowledgeService:
             "ORDER BY rank DESC "
             "LIMIT :top_k"
         )
-        result = await db.execute(stmt, {"query": query, "top_k": top_k})
+        result = await db.execute(stmt, {"query": segmented_query, "top_k": top_k})
         return [
             {
                 "id": r["id"],
@@ -176,13 +189,31 @@ class KnowledgeService:
                 seen[kid] = item
         return list(seen.values())
 
-    @staticmethod
-    def _rerank(results: list[dict], query: str) -> list[dict]:
-        """Simulated bge-reranker-large reranking.
+    def _rerank(self, results: list[dict], query: str) -> list[dict]:
+        """Rerank using DashScope gte-rerank, with weighted formula fallback."""
+        if not results:
+            return results
 
-        Combines vector similarity and keyword relevance with title/tag bonuses.
-        Replace with a real cross-encoder model when available.
-        """
+        # Try real cross-encoder reranker
+        documents = [
+            f"{item.get('title', '')} {item.get('content', '')}".strip()
+            for item in results
+        ]
+        rerank_results = self.reranker.rerank(query, documents, top_n=len(results))
+
+        if rerank_results:
+            score_map = {r["index"]: r["relevance_score"] for r in rerank_results}
+            for i, item in enumerate(results):
+                item["rerank_score"] = score_map.get(i, 0.0)
+        else:
+            self._fallback_rerank(results, query)
+
+        results.sort(key=lambda x: x["rerank_score"], reverse=True)
+        return results
+
+    @staticmethod
+    def _fallback_rerank(results: list[dict], query: str) -> None:
+        """Weighted scoring fallback when gte-rerank is unavailable."""
         query_lower = query.lower()
         for item in results:
             vector_score = item.get("score", 0.0) if item.get("source") != "keyword" else 0.0
@@ -199,9 +230,6 @@ class KnowledgeService:
             item["rerank_score"] = (
                 0.7 * vector_score + 0.2 * min(keyword_score, 1.0) + title_bonus + tag_bonus
             )
-
-        results.sort(key=lambda x: x["rerank_score"], reverse=True)
-        return results
 
     # ── 3. RAG Q&A chain ─────────────────────────────────
     async def ask_knowledge_base(self, db: AsyncSession, question: str) -> dict:
@@ -246,3 +274,97 @@ class KnowledgeService:
 
         answer = self.llm_service.chat("RAG", full_prompt)
         return {"answer": answer, "references": references}
+
+    # ── 4. Document upload & auto-chunking ────────────────
+    async def ingest_document(
+        self,
+        db: AsyncSession,
+        filename: str,
+        content: bytes,
+        subject: str = "Computer Science",
+        category: str = "General",
+        difficulty: str = "MEDIUM",
+    ) -> list[int]:
+        """Extract text from a document, chunk it, embed, and store."""
+        raw_text = extract_text_from_file(filename, content)
+        if not raw_text.strip():
+            raise AppException("document is empty or text extraction failed", code=3003)
+
+        suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        splitter = RecursiveTextSplitter(chunk_size=500, chunk_overlap=100)
+
+        cards: list[dict] = []
+        if suffix in ("md", "markdown"):
+            cards = self._chunk_markdown(raw_text, filename, subject, category, difficulty, splitter)
+        else:
+            cards = self._chunk_plain(raw_text, filename, subject, category, difficulty, splitter)
+
+        if not cards:
+            raise AppException("no content chunks extracted from document", code=3004)
+
+        return await self.ingest_cards(db, cards)
+
+    @staticmethod
+    def _chunk_markdown(
+        text: str,
+        filename: str,
+        subject: str,
+        category: str,
+        difficulty: str,
+        splitter: RecursiveTextSplitter,
+    ) -> list[dict]:
+        sections = split_markdown_sections(text)
+        cards: list[dict] = []
+        for section in sections:
+            section_title = section["title"] or filename
+            section_content = section["content"]
+            if not section_content.strip():
+                continue
+            if len(section_content) <= splitter.chunk_size:
+                cards.append({
+                    "subject": subject,
+                    "category": category,
+                    "type": "KNOWLEDGE",
+                    "difficulty": difficulty,
+                    "title": section_title,
+                    "content": section_content,
+                    "tags": [f"source:{filename}"],
+                })
+            else:
+                chunks = splitter.split_text(section_content)
+                for i, chunk in enumerate(chunks, 1):
+                    cards.append({
+                        "subject": subject,
+                        "category": category,
+                        "type": "KNOWLEDGE",
+                        "difficulty": difficulty,
+                        "title": f"{section_title} (part {i})",
+                        "content": chunk,
+                        "tags": [f"source:{filename}"],
+                    })
+        return cards
+
+    @staticmethod
+    def _chunk_plain(
+        text: str,
+        filename: str,
+        subject: str,
+        category: str,
+        difficulty: str,
+        splitter: RecursiveTextSplitter,
+    ) -> list[dict]:
+        chunks = splitter.split_text(text)
+        cards: list[dict] = []
+        for i, chunk in enumerate(chunks, 1):
+            first_line = chunk.split("\n")[0][:100].strip()
+            title = first_line if first_line else f"{filename} chunk {i}"
+            cards.append({
+                "subject": subject,
+                "category": category,
+                "type": "KNOWLEDGE",
+                "difficulty": difficulty,
+                "title": title,
+                "content": chunk,
+                "tags": [f"source:{filename}"],
+            })
+        return cards
