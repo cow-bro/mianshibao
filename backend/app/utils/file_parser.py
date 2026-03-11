@@ -5,18 +5,26 @@ from io import BytesIO
 import os
 from pathlib import Path
 import tempfile
+from typing import Any
 
 import pdfplumber
 from docx import Document
 
 
 @lru_cache(maxsize=1)
-def _get_ocr_engine():
+def _get_paddle_ocr_engine():
     # PaddleX performs online model-source checks by default; disable for offline containers.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     from paddleocr import PaddleOCR
 
     return PaddleOCR(use_angle_cls=True, lang="ch")
+
+
+@lru_cache(maxsize=1)
+def _get_rapidocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
+
+    return RapidOCR()
 
 
 def _extract_pdf_text(content: bytes) -> str:
@@ -58,25 +66,79 @@ def _extract_docx_text(content: bytes) -> str:
     return "\n".join(paragraphs)
 
 
-def _extract_image_text(content: bytes) -> str:
-    try:
-        ocr = _get_ocr_engine()
-    except Exception as exc:
-        raise RuntimeError("PaddleOCR is not installed") from exc
+def _extract_texts_from_paddle_result(result: Any) -> list[str]:
+    if result is None:
+        return []
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as temp_file:
-        temp_file.write(content)
-        temp_file.flush()
-        result = ocr.ocr(temp_file.name, cls=True)
+    if isinstance(result, dict):
+        texts = result.get("rec_texts") or result.get("texts") or []
+        return [str(text).strip() for text in texts if str(text).strip()]
+
+    if hasattr(result, "res"):
+        return _extract_texts_from_paddle_result(result.res)
+
+    if hasattr(result, "json"):
+        return _extract_texts_from_paddle_result(result.json)
+
+    if isinstance(result, (list, tuple)):
+        text_lines: list[str] = []
+        for item in result:
+            if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[1], (list, tuple)):
+                candidate = item[1][0] if item[1] else None
+                if candidate:
+                    text_lines.append(str(candidate).strip())
+                continue
+            text_lines.extend(_extract_texts_from_paddle_result(item))
+        return [line for line in text_lines if line]
+
+    return []
+
+
+def _extract_text_with_paddle(image_path: str) -> str:
+    ocr = _get_paddle_ocr_engine()
+    if hasattr(ocr, "predict"):
+        result = ocr.predict(image_path)
+    else:
+        result = ocr.ocr(image_path, cls=True)
+    return "\n".join(_extract_texts_from_paddle_result(result))
+
+
+def _extract_text_with_rapidocr(image_path: str) -> str:
+    ocr = _get_rapidocr_engine()
+    result, _ = ocr(image_path)
     if not result:
         return ""
 
     text_lines: list[str] = []
-    for group in result:
-        for line in group:
-            if len(line) >= 2 and line[1] and line[1][0]:
-                text_lines.append(str(line[1][0]).strip())
+    for item in result:
+        if len(item) >= 2 and item[1]:
+            text_lines.append(str(item[1]).strip())
     return "\n".join([line for line in text_lines if line])
+
+
+def _extract_image_text(content: bytes) -> str:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as temp_file:
+        temp_file.write(content)
+        temp_file.flush()
+        errors: list[Exception] = []
+
+        try:
+            text = _extract_text_with_paddle(temp_file.name)
+            if text.strip():
+                return text
+        except Exception as exc:
+            errors.append(exc)
+
+        try:
+            text = _extract_text_with_rapidocr(temp_file.name)
+            if text.strip():
+                return text
+        except Exception as exc:
+            errors.append(exc)
+
+    if errors:
+        raise RuntimeError("image OCR failed") from errors[-1]
+    return ""
 
 
 def parse_resume_file(file_name: str, content: bytes) -> dict:

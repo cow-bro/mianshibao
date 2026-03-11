@@ -3,34 +3,35 @@ from __future__ import annotations
 import json
 import tempfile
 import time
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import jwt
 import requests
 from docx import Document
 from PIL import Image, ImageDraw
 from sqlalchemy import select
 
-from app.core.config import get_settings
 from app.core.database import SessionLocal
+from app.core.security import get_password_hash
 from app.models.user import User, UserRole
 
 API_BASE = "http://backend:8000/api/v1"
 
 
-def make_auth_header(user_id: int) -> dict[str, str]:
-    settings = get_settings()
-    token = jwt.encode(
-        {
-            "sub": str(user_id),
-            "type": "access",
-            "exp": datetime.now(UTC) + timedelta(hours=1),
-        },
-        settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
+def login_and_get_auth_header() -> dict[str, str]:
+    code, resp = call(
+        "POST",
+        f"{API_BASE}/auth/login",
+        json={"username": "demo", "password": "demo123"},
     )
-    return {"Authorization": f"Bearer {token}"}
+    if code != 200:
+        raise RuntimeError(f"login failed: status={code}, body={resp.text}")
+
+    payload = resp.json()
+    access_token = payload.get("data", {}).get("access_token")
+    if not access_token:
+        raise RuntimeError(f"missing access token in login response: {payload}")
+
+    return {"Authorization": f"Bearer {access_token}"}
 
 
 async def ensure_demo_user() -> int:
@@ -38,10 +39,21 @@ async def ensure_demo_user() -> int:
         result = await db.execute(select(User).where(User.username == "demo"))
         user = result.scalar_one_or_none()
         if user is None:
-            user = User(username="demo", hashed_password="demo123", role=UserRole.USER, is_active=True)
+            user = User(
+                username="demo",
+                hashed_password=get_password_hash("demo123"),
+                role=UserRole.USER,
+                is_active=True,
+            )
             db.add(user)
             await db.commit()
             await db.refresh(user)
+        else:
+            user.hashed_password = get_password_hash("demo123")
+            user.is_active = True
+            if user.role is None:
+                user.role = UserRole.USER
+            await db.commit()
         return user.id
 
 
@@ -85,8 +97,8 @@ def call(method: str, url: str, timeout: int = 120, retries: int = 30, **kwargs)
 def main() -> None:
     import asyncio
 
-    user_id = asyncio.run(ensure_demo_user())
-    auth_headers = make_auth_header(user_id)
+    asyncio.run(ensure_demo_user())
+    auth_headers = login_and_get_auth_header()
 
     report: dict[str, dict] = {}
 
