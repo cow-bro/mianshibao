@@ -436,3 +436,113 @@ curl -L http://localhost:8000/api/v1/resumes/<resume_id>/download-optimized \
     -H "Authorization: Bearer <access_token>" \
     -o optimized_resume.txt
 ```
+
+## 16. 阶段 5 交付说明（结构化 RAG 知识引擎）
+
+已完成以下能力:
+
+- **知识写入 (Indexing)**:
+    - `KnowledgeService.ingest_cards()` 批量写入知识卡片
+    - 使用 DashScope `text-embedding-v2` 生成 1536 维向量
+    - 向量存入 `knowledge_point.embedding` (pgvector HNSW 索引)
+    - 全文检索向量存入 `knowledge_point.search_vector` (tsvector GIN 索引)
+    - 支持 JSON 和 Markdown 两种知识卡片格式
+
+- **双路召回与重排序 (Retrieval)**:
+    - Path A (向量): pgvector 余弦相似度搜索 Top K
+    - Path B (关键词): PostgreSQL tsvector 全文检索 Top K
+    - 合并去重后通过模拟 bge-reranker-large 重排序（0.7 向量 + 0.2 关键词 + title/tag bonus）
+    - 返回 Top 3 最相关知识点
+
+- **RAG 问答链 (Chain)**:
+    - System Prompt: "你是专业的校招面试官助手。请仅基于以下提供的参考资料回答用户的问题。如果资料中没有答案，请直接告知用户无法回答，不要编造。"
+    - 检索 → 构建上下文 → LLM 生成 → 返回答案 + 参考来源
+    - LLM 场景配置: `RAG` (qwen-plus, temperature=0.3)
+
+- **接口交付**:
+    - `POST /api/v1/knowledge/ingest` — 批量导入知识卡片
+    - `POST /api/v1/knowledge/search` — 双路混合检索
+    - `POST /api/v1/knowledge/ask` — RAG 问答
+    - 全部受 JWT 鉴权保护
+
+核心代码位置:
+
+- `backend/app/services/knowledge_service.py` — 知识写入、双路召回、重排序、RAG 问答
+- `backend/app/providers/embedding.py` — DashScope text-embedding-v2 封装
+- `backend/app/api/v1/endpoints/knowledge.py` — API 端点
+- `backend/app/schemas/knowledge.py` — 请求/响应数据结构
+- `backend/app/models/knowledge_point.py` — ORM 模型（含 search_vector）
+- `backend/app/prompts/rag_qa.txt` — RAG 系统提示词
+- `backend/scripts/ingest_knowledge.py` — 离线知识导入脚本
+- `backend/data/sample_knowledge.json` — 5 条样例知识卡片
+
+## 17. 阶段 5 Docker 更新与测试步骤
+
+### 17.1 更新后端镜像
+
+```bash
+docker compose build backend
+```
+
+### 17.2 启动/重启服务
+
+```bash
+docker compose up -d postgres redis minio backend
+```
+
+### 17.3 执行数据库迁移（新增 search_vector 列 + GIN 索引）
+
+```bash
+docker compose exec backend alembic upgrade head
+```
+
+### 17.4 导入样例知识数据
+
+```bash
+docker compose exec backend python -m scripts.ingest_knowledge data/sample_knowledge.json
+```
+
+### 17.5 登录获取 Access Token
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"demo","password":"demo123"}'
+```
+
+### 17.6 知识导入（API 方式）
+
+```bash
+curl -X POST http://localhost:8000/api/v1/knowledge/ingest \
+    -H "Authorization: Bearer <access_token>" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "cards": [
+        {
+          "title": "什么是 RESTful API？",
+          "content": "REST 是一种软件架构风格...",
+          "category": "计算机网络",
+          "difficulty": "EASY",
+          "tags": ["REST", "API", "HTTP"]
+        }
+      ]
+    }'
+```
+
+### 17.7 知识检索（双路混合搜索）
+
+```bash
+curl -X POST http://localhost:8000/api/v1/knowledge/search \
+    -H "Authorization: Bearer <access_token>" \
+    -H "Content-Type: application/json" \
+    -d '{"query": "TCP 三次握手", "top_k": 3}'
+```
+
+### 17.8 RAG 知识问答
+
+```bash
+curl -X POST http://localhost:8000/api/v1/knowledge/ask \
+    -H "Authorization: Bearer <access_token>" \
+    -H "Content-Type: application/json" \
+    -d '{"question": "请解释 TCP 三次握手的过程"}'
+```

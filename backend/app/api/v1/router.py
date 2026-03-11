@@ -2,9 +2,11 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.health import router as health_router
+from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.resume import router as resume_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(health_router, prefix="/health", tags=["health"])
 api_router.include_router(resume_router, prefix="/resumes", tags=["resumes"])
+api_router.include_router(knowledge_router, prefix="/knowledge", tags=["knowledge"])

@@ -2,7 +2,7 @@ import enum
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Enum, String, Text
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, BaseModelMixin
@@ -38,6 +38,7 @@ class KnowledgePoint(Base, BaseModelMixin):
     source_company: Mapped[str | None] = mapped_column(String(100), nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String(50)), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    search_vector = mapped_column(TSVECTOR, nullable=True)
 
     wrong_questions = relationship(
         "WrongQuestion", back_populates="knowledge_point", cascade="all, delete-orphan"
