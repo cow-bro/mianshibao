@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node
+node_modules/
+.next/
+
+# Environment
+.env
+.env.*
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
+!.env.example
+!.env.template
+!backend/.env.example
+!frontend/.env.example
+# Editors
+.vscode/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Offoce
+
+~$.doc
+~$.docx
+~$.xls
+~$.xlsx
+~$.ppt
+~$.pptx
+
+# Logs/Temp
+*.log
+*.tmp
+*.temp
+
+# User-requested local planning/debug docs
+mianshibao.md
+调试日志.md
+project_ai_prompts.md
+面试宝优化方案：从方案可靠性分析到科学开发步骤.md
