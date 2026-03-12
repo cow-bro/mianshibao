@@ -1,4 +1,5 @@
 from app.models.interview_message import InterviewMessage, InterviewMessageRole
+from app.models.interview_report import InterviewReport
 from app.models.interview_session import InterviewSession, InterviewStatus
 from app.models.job_category import JobCategory
 from app.models.job_position import JobPosition, PositionLevel
@@ -13,6 +14,7 @@ __all__ = [
 	"DifficultyLevel",
 	"InterviewMessage",
 	"InterviewMessageRole",
+	"InterviewReport",
 	"InterviewSession",
 	"InterviewStatus",
 	"JobCategory",

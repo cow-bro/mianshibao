@@ -41,6 +41,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: "false"
     container_name: mianshibao-backend
     env_file:
       - ./backend/.env.example
@@ -53,6 +55,29 @@ services:
         condition: service_started
       minio:
         condition: service_started
+
+  backend-test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        INSTALL_DEV: "true"
+    container_name: mianshibao-backend-test
+    env_file:
+      - ./backend/.env.example
+    environment:
+      PYTHONPATH: /app
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_started
+    command: >
+      sh -c "alembic upgrade head && pytest -q tests/services/test_interview_graph.py"
+    profiles: ["test"]
 
   frontend:
     build:

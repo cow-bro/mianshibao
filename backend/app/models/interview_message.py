@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, BaseModelMixin
@@ -23,6 +23,8 @@ class InterviewMessage(Base, BaseModelMixin):
         nullable=False,
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    question_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(50), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

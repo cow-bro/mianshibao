@@ -18,6 +18,8 @@ dependencies = [
     "tenacity>=9.0.0",
     "circuitbreaker>=2.0.0",
     "langchain-core>=0.3.17",
+    "langgraph>=0.2.56",
+    "langgraph-checkpoint-postgres>=2.0.15",
     "pdfplumber>=0.11.4",
     "python-docx>=1.1.2",
     "paddlepaddle>=3.0.0",
@@ -38,6 +40,8 @@ dependencies = [
 dev = [
     "ruff>=0.8.0",
     "pre-commit>=4.0.1",
+    "pytest>=8.3.3",
+    "pytest-asyncio>=0.24.0",
 ]
 
 [tool.ruff]

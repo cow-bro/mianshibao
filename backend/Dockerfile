@@ -4,6 +4,7 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ARG INSTALL_DEV=false
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
@@ -17,13 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml /app/
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
+    if [ "$INSTALL_DEV" = "true" ]; then pip install --no-cache-dir ".[dev]"; else pip install --no-cache-dir .; fi
 
 COPY app /app/app
 COPY alembic /app/alembic
 COPY alembic.ini /app/alembic.ini
 COPY scripts /app/scripts
 COPY data /app/data
+COPY tests /app/tests
 
 EXPOSE 8000
 

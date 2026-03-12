@@ -28,7 +28,10 @@ class User(Base, BaseModelMixin):
 
     resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
     interview_sessions = relationship(
-        "InterviewSession", back_populates="user", cascade="all, delete-orphan"
+        "InterviewSession",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="InterviewSession.user_id",
     )
     wrong_questions = relationship(
         "WrongQuestion", back_populates="user", cascade="all, delete-orphan"
