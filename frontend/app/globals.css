@@ -3,20 +3,46 @@
 @tailwind utilities;
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 222 47% 11%;
-  --primary: 214 84% 56%;
-  --primary-foreground: 210 40% 98%;
-  --secondary: 210 40% 96%;
-  --secondary-foreground: 222 47% 11%;
-  --muted: 210 40% 96%;
-  --muted-foreground: 215 16% 47%;
-  --border: 214 32% 91%;
-  --input: 214 32% 91%;
-  --ring: 214 84% 56%;
+  --background: 40 20% 98%;
+  --foreground: 0 0% 9%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 9%;
+  --primary: 0 0% 9%;
+  --primary-foreground: 40 20% 98%;
+  --secondary: 40 10% 95%;
+  --secondary-foreground: 0 0% 9%;
+  --muted: 40 10% 96%;
+  --muted-foreground: 0 0% 45%;
+  --accent: 40 10% 94%;
+  --accent-foreground: 0 0% 9%;
+  --border: 0 0% 90%;
+  --input: 0 0% 90%;
+  --ring: 0 0% 9%;
+  --radius: 0.75rem;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 98%;
 }
 
 body {
   color: hsl(var(--foreground));
-  background: radial-gradient(circle at top right, #dbeafe 0%, #f8fafc 45%, #f1f5f9 100%);
+  background: hsl(var(--background));
+}
+
+@layer utilities {
+  .animate-in {
+    animation: animateIn 0.2s ease-out;
+  }
+  .slide-in-from-right-full {
+    --tw-enter-translate-x: 100%;
+  }
+  @keyframes animateIn {
+    from {
+      opacity: 0;
+      transform: translateX(var(--tw-enter-translate-x, 0)) translateY(var(--tw-enter-translate-y, 0));
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0) translateY(0);
+    }
+  }
 }

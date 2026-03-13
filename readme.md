@@ -818,3 +818,250 @@ docker compose exec -T postgres psql -U postgres -d mianshibao -c \
 | 12 | FTS 重建脚本 | `reindex_knowledge_fts` 正常执行 | ✅ |
 
 **全部 12/12 项通过，阶段 5.1 验收通过。** ✅
+
+## 20. 阶段 6 交付说明（状态机驱动模拟面试）
+
+本阶段已完成「模拟面试核心引擎」的后端落地，重点能力如下：
+
+- 状态机面试流程：WELCOME → RESUME_DIG → TECH_QA → CANDIDATE_QUESTION → END
+- WebSocket 流式交互：支持 token、message、state_change、report_ready、ping
+- 面试会话与报告持久化：新增 interview_report 表，扩展 session/message 字段
+- 人工介入预留接口：路由已提供，当前返回 501（符合预期）
+- Docker 测试链路：新增 backend-test 容器服务，支持容器内迁移与 pytest
+
+核心实现文件：
+
+- `backend/app/services/interview_graph.py`
+- `backend/app/services/interview_service.py`
+- `backend/app/api/v1/endpoints/interview.py`
+- `backend/app/api/v1/endpoints/interview_ws.py`
+- `backend/app/schemas/interview.py`
+- `backend/app/models/interview_session.py`
+- `backend/app/models/interview_message.py`
+- `backend/app/models/interview_report.py`
+- `backend/alembic/versions/20260312_01_stage6_interview_engine.py`
+
+## 21. 阶段 6 Docker 测试结论
+
+已在 Docker 容器内完成如下验证：
+
+1. 构建镜像并启动依赖服务成功
+2. 执行迁移成功（包含阶段 6 新增表与字段）
+3. 阶段 6 单测通过：3 passed
+4. 后端健康检查通过：`/api/v1/health`
+5. 面试相关 HTTP 路由已暴露：
+    - `/api/v1/interview/sessions`
+    - `/api/v1/interview/sessions/{session_id}/report`
+    - `/api/v1/interview/{session_id}/human-intervention/*`
+
+说明：WebSocket 路由不会出现在 OpenAPI 文档中，属于 FastAPI 正常行为。
+
+## 22. 阶段 6 常见排障（已修复）
+
+### 22.1 `create_demo_user` 报 `AmbiguousForeignKeysError`
+
+原因：`interview_session` 新增 `human_operator_id` 后，与 `user` 之间存在两条外键路径，ORM 关系映射歧义。
+
+修复：
+
+- `InterviewSession.user` 显式绑定 `foreign_keys=[user_id]`
+- 新增 `InterviewSession.human_operator` 并绑定 `foreign_keys=[human_operator_id]`
+- `User.interview_sessions` 显式指定 `foreign_keys="InterviewSession.user_id"`
+
+### 22.2 WebSocket 无法连接（URL 参数重复）
+
+错误示例（不要使用）：
+
+- `ws://localhost:8000/api/v1/interview/ws?session_id=2&session_id=<session_id>&user_id=1&user_id=<user_id>`
+
+正确示例（只保留一组参数）：
+
+- `ws://localhost:8000/api/v1/interview/ws?session_id=2&user_id=1`
+
+### 22.3 PowerShell 下 `curl` 多行命令失败
+
+建议优先使用单行命令，或改用 Postman / Apifox 进行接口与 WebSocket 调试。
+
+## 23. 阶段 6 测试指南入口
+
+完整测试步骤与验收清单见：
+
+- `阶段六测试指南.md`
+
+## 24. 阶段 7 交付说明（前端全页面开发）
+
+本阶段完成前端所有功能页面的实现，覆盖简历分析、知识学习、模拟面试三大核心模块。
+
+### 24.1 技术栈补充
+
+在阶段 1 基础上新增：
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| `recharts` | ^2.x | 简历评分 / 面试报告雷达图 |
+| `react-markdown` | ^9.x | 面试对话 / 报告的 Markdown 渲染 |
+| `react-use-websocket` | ^4.x | 面试对话 WebSocket 连接管理 |
+| `@types/prop-types` | ^15.x | TypeScript 类型补全 |
+
+### 24.2 设计系统
+
+- **配色方案**：黑白灰米白（米白背景 `hsl(40 20% 98%)`，近黑主色 `hsl(0 0% 9%)`）
+- **间距规范**：8pt 网格
+- **Card 规范**：`rounded-xl border border-border/60 bg-card shadow-sm hover:shadow-md`
+- **Button 变体**：`default`、`outline`、`ghost`
+
+### 24.3 新增/修改文件清单
+
+#### Shadcn UI 组件层 (`components/ui/`)
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `button.tsx` | 修改 | 新增 `ghost` variant |
+| `input.tsx` | 新增 | 文本输入组件 |
+| `card.tsx` | 新增 | 卡片容器组件 |
+| `badge.tsx` | 新增 | 标签组件（default/secondary/destructive/outline） |
+| `progress.tsx` | 新增 | 进度条组件 |
+| `slider.tsx` | 新增 | 滑块组件（支持 number 或 number[]） |
+| `skeleton.tsx` | 新增 | 骨架屏加载占位组件 |
+| `textarea.tsx` | 新增 | 多行文本输入组件 |
+| `label.tsx` | 新增 | 表单标签组件 |
+| `separator.tsx` | 新增 | 分隔线组件 |
+| `select.tsx` | 新增 | 下拉选择组件 |
+| `collapsible.tsx` | 新增 | 可折叠面板组件 |
+| `toast.tsx` | 新增 | Toast 通知组件（Provider + useToast hook） |
+
+#### 基础设施层
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `app/globals.css` | 修改 | 黑白灰米白设计令牌 + Toast 动画关键帧 |
+| `tailwind.config.ts` | 修改 | 新增 accent/destructive/card 色彩令牌 + borderRadius |
+| `store/useAuthStore.ts` | 修改 | 新增 login()/logout()/hydrate() + JWT 解码 userId/username |
+| `store/useInterviewStore.ts` | 修改 | 新增 ChatMessage 接口、消息列表、流式内容、阶段管理 |
+| `hooks/useRequireAuth.ts` | 新增 | 路由守卫 Hook，未登录自动跳转 /login |
+| `app/providers.tsx` | 新增 | 客户端 Provider 包装器（ToastProvider） |
+| `app/layout.tsx` | 修改 | 包装 Providers 组件 |
+
+#### 页面层
+
+| 路由 | 文件 | 说明 |
+|------|------|------|
+| `/` | `app/page.tsx` | 入口重定向（有 token → /dashboard，无 → /login） |
+| `/login` | `app/login/page.tsx` | 登录页 + 注册预留（toast 提示即将上线） |
+| `/dashboard` | `app/dashboard/layout.tsx` | 顶部导航栏（品牌 + 用户名 + 登出） |
+| `/dashboard` | `app/dashboard/page.tsx` | 主页三卡片入口（简历分析/知识学习/模拟面试） |
+| `/resume` | `app/resume/layout.tsx` | 简历模块认证守卫 |
+| `/resume` | `app/resume/page.tsx` | 简历上传 + 解析 + 雷达图评分 + AI 优化 + 下载 |
+| `/knowledge` | `app/knowledge/layout.tsx` | 知识模块认证守卫 |
+| `/knowledge` | `app/knowledge/page.tsx` | 知识学习入口（通用八股 / 岗位专业 双卡片） |
+| `/knowledge/general` | `app/knowledge/general/page.tsx` | 通用八股文（左侧 sticky 目录 + 右侧 Card 网格 + IntersectionObserver 联动） |
+| `/knowledge/position` | `app/knowledge/position/page.tsx` | 岗位专业知识（同构布局，scope=POSITION） |
+| `/interview` | `app/interview/layout.tsx` | 面试模块认证守卫 |
+| `/interview` | `app/interview/page.tsx` | 面试初始化表单（Collapsible 高级配置、Slider 参数） |
+| `/interview/[sessionId]` | `app/interview/[sessionId]/page.tsx` | WebSocket 面试对话（流式打字机 + react-markdown + 计时器） |
+| `/interview/report/[sessionId]` | `app/interview/report/[sessionId]/page.tsx` | 面试报告（雷达图 + 维度进度条 + 亮点/不足 + 逐题折叠 + Markdown 总结） |
+
+### 24.4 页面功能详述
+
+#### 简历分析 (`/resume`)
+
+1. **拖拽上传区**：支持拖放或点击上传 PDF/DOCX，调用 `POST /resumes/upload`
+2. **解析**：调用 `POST /resumes/{id}/parse`，展示结构化 JSON
+3. **评分**：调用 `POST /resumes/{id}/score`，Recharts RadarChart 雷达图 + 维度分数明细
+4. **AI 优化**：调用 `POST /resumes/{id}/optimize`
+5. **下载**：调用 `GET /resumes/{id}/download-optimized`
+6. 全程 Skeleton 骨架屏加载态
+
+#### 知识学习 (`/knowledge/*`)
+
+1. **入口页**：双卡片选择（通用八股 / 岗位专业）
+2. **通用八股 / 岗位专业**：调用 `POST /knowledge/search` 获取知识点，按 subject → category 分组
+3. **左侧目录**：`sticky top-20`，点击滚动到对应分组，`IntersectionObserver` 滚动联动高亮
+4. **右侧内容**：Card 网格，显示科目名 + 题目数量
+5. Card 点击预留（toast 提示"详细学习页面开发中"）
+
+#### 模拟面试 (`/interview/*`)
+
+1. **初始化页**：目标公司/岗位/JD 表单 + Collapsible 高级配置（题数 Slider、时长 Select）
+2. **对话页**：
+   - WebSocket 连接（`react-use-websocket`，自动重连、心跳 25s）
+   - TOKEN 消息 → 流式打字机效果；MESSAGE 消息 → 完整气泡
+   - 面试官消息左对齐 + `react-markdown` 渲染；候选人消息右对齐
+   - 顶部状态栏：阶段标签 + 计时器 + 结束面试按钮
+   - 底部输入：发送/跳过/语音预留，Enter 发送 + Shift+Enter 换行
+   - STATE_CHANGE → 更新阶段；REPORT_READY → 弹窗跳转报告页
+3. **报告页**：
+   - 概览卡片（公司/岗位/时长/题数 + 综合大分）
+   - Recharts RadarChart 五维雷达图
+   - Progress 维度分数条
+   - 亮点（绿点）/ 不足（橙点）双列卡片
+   - 改进建议有序列表
+   - 推荐复习知识点 Badge 标签
+   - 逐题折叠评分（Collapsible）
+   - Markdown 面试总结
+
+### 24.5 构建结果
+
+```
+Route (app)                              Size     First Load JS
+┌ ○ /                                    1.54 kB         110 kB
+├ ○ /dashboard                           1.69 kB          89 kB
+├ ○ /interview                           4.22 kB         120 kB
+├ ƒ /interview/[sessionId]               11.4 kB         161 kB
+├ ƒ /interview/report/[sessionId]        4.2 kB          239 kB
+├ ○ /knowledge                           1.59 kB        88.9 kB
+├ ○ /knowledge/general                   3.03 kB         119 kB
+├ ○ /knowledge/position                  3.03 kB         119 kB
+├ ○ /login                               4.2 kB          120 kB
+└ ○ /resume                              4.13 kB         205 kB
+
+○  (Static)   prerendered as static content
+ƒ  (Dynamic)  server-rendered on demand
+```
+
+11 个路由全部编译通过，其中 9 个静态预渲染、2 个动态（含 `[sessionId]` 参数）。
+
+### 24.6 前端启动
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+访问 `http://localhost:3000`，自动重定向至登录页。
+
+### 24.7 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000/api/v1` | 后端 API 地址 |
+| `NEXT_PUBLIC_WS_BASE_URL` | `ws://localhost:8000/api/v1` | WebSocket 地址 |
+
+### 24.8 前后端联调测试步骤
+
+1. 启动后端服务：
+
+```bash
+docker compose up -d postgres redis minio backend
+docker compose exec backend alembic upgrade head
+```
+
+2. 创建测试用户（如未创建）：
+
+```bash
+docker compose exec backend python -m scripts.create_demo_user
+```
+
+3. 启动前端：
+
+```bash
+cd frontend
+npm run dev
+```
+
+4. 打开 `http://localhost:3000`，使用 `demo / demo123` 登录
+5. 依次测试：
+   - **简历分析**：上传 PDF → 解析 → 评分（雷达图） → 优化 → 下载
+   - **知识学习**：浏览通用八股 / 岗位专业知识分类
+   - **模拟面试**：填写表单 → 开始面试 → WebSocket 对话 → 查看报告
