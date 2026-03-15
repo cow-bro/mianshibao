@@ -13,6 +13,7 @@ from app.models.knowledge_point import DifficultyLevel, KnowledgePoint, Knowledg
 from app.providers.embedding import EmbeddingProvider
 from app.providers.llm_factory import LLMService
 from app.providers.reranker import RerankerProvider
+from app.utils.prompt_manager import PromptManager
 from app.utils.text_splitter import (
     RecursiveTextSplitter,
     extract_text_from_file,
@@ -27,6 +28,7 @@ class KnowledgeService:
         self.embedder = EmbeddingProvider()
         self.llm_service = LLMService()
         self.reranker = RerankerProvider()
+        self.prompt_manager = PromptManager()
         self._rag_prompt = self._load_rag_prompt()
 
     # ── RAG prompt ─────────────────────────────────────────
@@ -265,11 +267,17 @@ class KnowledgeService:
 
         context = "\n\n".join(context_parts)
 
-        full_prompt = (
-            f"{self._rag_prompt}\n\n"
-            f"参考资料:\n{context}\n\n"
-            f"用户问题: {question}\n\n"
-            f"请基于以上参考资料回答:"
+        full_prompt = self.prompt_manager.render_with_fallback(
+            "knowledge/rag_answer.md",
+            (
+                "{{ rag_system_prompt }}\n\n"
+                "参考资料:\n{{ context }}\n\n"
+                "用户问题: {{ question }}\n\n"
+                "请基于以上参考资料回答:"
+            ),
+            rag_system_prompt=self._rag_prompt,
+            context=context,
+            question=question,
         )
 
         answer = self.llm_service.chat("RAG", full_prompt)

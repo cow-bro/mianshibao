@@ -115,6 +115,21 @@ class InterviewService:
         await self._persist_delta(db, session, state)
         return state
 
+    async def end_session(
+        self,
+        db: AsyncSession,
+        session: InterviewSession,
+        message: str = "结束面试",
+    ) -> InterviewState:
+        state = await self.load_or_init_state(db, session)
+        if state["status"] == "ENDED":
+            return state
+
+        state["current_answer"] = message
+        state = await self.graph.run_turn(state, db)
+        await self._persist_delta(db, session, state)
+        return state
+
     async def _persist_delta(self, db: AsyncSession, session: InterviewSession, state: InterviewState) -> None:
         persisted_count = int(state.get("_persisted_messages", 0))
         new_messages = state["message_history"][persisted_count:]

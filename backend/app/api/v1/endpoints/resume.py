@@ -19,12 +19,14 @@ async def upload_resume(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> dict:
-    resume = await service.upload_resume(db=db, user=current_user, file=file)
+    resume, is_new = await service.upload_resume(db=db, user=current_user, file=file)
     return success_response(
         data={
             "resume_id": resume.id,
             "file_url": resume.file_url,
             "file_name": resume.file_name,
+            "is_new": is_new,
+            "has_parsed_content": resume.parsed_content is not None,
         }
     )
 
@@ -70,4 +72,18 @@ async def download_optimized_resume(
         BytesIO(content),
         media_type="text/plain",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{resume_id}/preview-pdf", summary="Preview uploaded resume as PDF")
+async def preview_resume_pdf(
+    resume_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> StreamingResponse:
+    content, filename = await service.preview_resume_pdf(db=db, user=current_user, resume_id=resume_id)
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )

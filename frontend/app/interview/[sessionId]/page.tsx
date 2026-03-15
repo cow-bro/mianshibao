@@ -10,6 +10,8 @@ import { useToast } from "@/components/ui/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Send, Mic, SkipForward, LogOut } from "lucide-react";
+import api from "@/lib/http";
+import type { ApiResponse } from "@/lib/types";
 
 const STAGE_LABELS: Record<string, string> = {
   WELCOME: "欢迎",
@@ -44,6 +46,7 @@ export default function InterviewChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [reportReady, setReportReady] = useState(false);
+  const [ending, setEnding] = useState(false);
 
   const wsUrl =
     userId && sessionId
@@ -72,30 +75,26 @@ export default function InterviewChatPage() {
   // Handle incoming messages
   useEffect(() => {
     if (!lastJsonMessage) return;
-    const msg = lastJsonMessage as { type: string; content?: string; stage?: string; role?: string };
+    const msg = lastJsonMessage as { type: string; data?: any; timestamp?: string };
 
     switch (msg.type) {
-      case "TOKEN":
-        appendToken(msg.content ?? "");
+      case "token":
+        appendToken((msg.data as string) ?? "");
         break;
-      case "MESSAGE":
-        finalizeMessage();
-        if (msg.content) {
-          addMessage({
-            role: (msg.role as "INTERVIEWER" | "CANDIDATE") ?? "INTERVIEWER",
-            content: msg.content,
-            timestamp: new Date().toISOString(),
-          });
-        }
+      case "message":
+        // Prefer streamed tokens, but fall back to full message when token stream is absent.
+        const msgData = msg.data as { content: string; role?: string };
+        finalizeMessage(msgData?.content);
         break;
-      case "STATE_CHANGE":
-        if (msg.stage) setStage(msg.stage);
+      case "state_change":
+        const stateData = msg.data as { new_stage: string };
+        if (stateData?.new_stage) setStage(stateData.new_stage);
         break;
-      case "REPORT_READY":
+      case "report_ready":
         setReportReady(true);
         break;
-      case "ERROR":
-        toast({ title: msg.content ?? "发生错误", variant: "destructive" });
+      case "error":
+        toast({ title: (msg.data as string) ?? "发生错误", variant: "destructive" });
         break;
       default:
         break;
@@ -115,7 +114,7 @@ export default function InterviewChatPage() {
   const sendMessage = useCallback(() => {
     const text = inputValue.trim();
     if (!text) return;
-    sendJsonMessage({ type: "ANSWER", content: text });
+    sendJsonMessage({ type: "ANSWER", message: text });
     addMessage({ role: "CANDIDATE", content: text, timestamp: new Date().toISOString() });
     setInputValue("");
   }, [inputValue, sendJsonMessage, addMessage]);
@@ -133,6 +132,35 @@ export default function InterviewChatPage() {
     return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
   };
 
+  const handleEndInterview = useCallback(() => {
+    if (ending) return;
+    setEnding(true);
+
+    (async () => {
+      try {
+        if (readyState === ReadyState.OPEN) {
+          sendJsonMessage({ type: "END_INTERVIEW", message: "结束面试" });
+        }
+
+        const res = await api.post<
+          ApiResponse<{ session_id: number; status: string; current_stage: string; report_ready: boolean }>
+        >(`/interview/sessions/${sessionId}/end`);
+
+        const data = res.data.data;
+        if (data?.current_stage) {
+          setStage(data.current_stage);
+        }
+        if (data?.report_ready) {
+          setReportReady(true);
+        }
+      } catch {
+        toast({ title: "结束面试失败，请稍后重试", variant: "destructive" });
+      } finally {
+        setEnding(false);
+      }
+    })();
+  }, [ending, readyState, sendJsonMessage, sessionId, setStage, toast]);
+
   return (
     <div className="flex flex-col h-screen">
       {/* Top bar */}
@@ -144,12 +172,11 @@ export default function InterviewChatPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => {
-            sendJsonMessage({ type: "END_INTERVIEW" });
-          }}
+          onClick={handleEndInterview}
+          disabled={isInterviewEnded || ending}
         >
           <LogOut className="h-4 w-4 mr-1" />
-          结束面试
+          {ending ? "结束中..." : "结束面试"}
         </Button>
       </header>
 
@@ -198,8 +225,9 @@ export default function InterviewChatPage() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => sendJsonMessage({ type: "SKIP" })}
+          onClick={() => sendJsonMessage({ type: "SKIP", message: "跳过当前问题" })}
           title="跳过当前问题"
+          disabled={isInterviewEnded || readyState !== ReadyState.OPEN}
         >
           <SkipForward className="h-4 w-4" />
         </Button>

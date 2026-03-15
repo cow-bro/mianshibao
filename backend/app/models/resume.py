@@ -11,6 +11,7 @@ class Resume(Base, BaseModelMixin):
     user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
     file_url: Mapped[str] = mapped_column(String(255), nullable=False)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     parsed_content: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     dimension_scores: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

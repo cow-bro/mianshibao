@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -7,7 +8,6 @@ from pathlib import Path
 
 from fastapi import UploadFile
 from langchain_core.output_parsers import PydanticOutputParser
-from langchain_core.prompts import PromptTemplate
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,18 +18,27 @@ from app.models.user import User
 from app.providers.llm_factory import LLMService
 from app.providers.storage import download_bytes, upload_bytes
 from app.schemas.resume import ResumeOptimizeResult, ResumeScoreResult, ResumeStructured
-from app.utils.file_parser import parse_resume_file
+from app.utils.file_parser import convert_resume_to_preview_pdf, parse_resume_file
+from app.utils.prompt_manager import PromptManager
 
 
 class ResumeService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.llm_service = LLMService()
+        self.prompt_manager = PromptManager()
 
-    async def upload_resume(self, db: AsyncSession, user: User, file: UploadFile) -> Resume:
+    async def upload_resume(self, db: AsyncSession, user: User, file: UploadFile) -> tuple[Resume, bool]:
         content = await file.read()
         if not content:
             raise AppException("empty file", code=2001)
+
+        file_hash = hashlib.sha256(content).hexdigest()
+        stmt = select(Resume).where(Resume.user_id == user.id, Resume.file_hash == file_hash)
+        result = await db.execute(stmt)
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing, False
 
         suffix = Path(file.filename or "resume.bin").suffix
         object_name = f"raw/{user.id}/{uuid.uuid4().hex}{suffix}"
@@ -44,6 +53,7 @@ class ResumeService:
             user_id=user.id,
             file_url=file_url,
             file_name=file.filename or object_name,
+            file_hash=file_hash,
             parsed_content=None,
             overall_score=None,
             dimension_scores=None,
@@ -52,7 +62,7 @@ class ResumeService:
         db.add(resume)
         await db.commit()
         await db.refresh(resume)
-        return resume
+        return resume, True
 
     async def parse_resume(self, db: AsyncSession, user: User, resume_id: int) -> dict:
         resume = await self._get_user_resume(db, user.id, resume_id)
@@ -74,12 +84,16 @@ class ResumeService:
         resume = await self._get_user_resume(db, user.id, resume_id)
         text = self._resume_text_for_llm(resume)
 
-        prompt = (
-            "你是资深HR，请根据以下简历内容，从完整性、经历匹配度、技能相关性、排版规范性四个维度打分（0-100），"
-            "并给出具体的修改建议。\n"
-            "请严格输出 JSON，格式如下:\n"
-            "{\"overall_score\": 0-100, \"dimension_scores\": {\"完整性\": 0-100, \"经历匹配度\": 0-100, \"技能相关性\": 0-100, \"排版规范性\": 0-100}, \"suggestions\": \"...\"}\n\n"
-            f"简历内容:\n{text}"
+        prompt = self.prompt_manager.render_with_fallback(
+            "resume/score.md",
+            (
+                "你是资深HR，请根据以下简历内容，从完整性、经历匹配度、技能相关性、排版规范性四个维度打分（0-100），"
+                "并给出具体的修改建议。\n"
+                "请严格输出 JSON，格式如下:\n"
+                "{\"overall_score\": 0-100, \"dimension_scores\": {\"完整性\": 0-100, \"经历匹配度\": 0-100, \"技能相关性\": 0-100, \"排版规范性\": 0-100}, \"suggestions\": \"...\"}\n\n"
+                "简历内容:\n{{ resume_text }}"
+            ),
+            resume_text=text,
         )
         raw = self.llm_service.chat("RESUME_PARSING", prompt)
         result = self._parse_score_json(raw)
@@ -94,10 +108,14 @@ class ResumeService:
         resume = await self._get_user_resume(db, user.id, resume_id)
         text = self._resume_text_for_llm(resume)
 
-        prompt = (
-            "你是资深HR，请使用 STAR 法则润色以下简历经历描述。"
-            "要求：保留事实，不要虚构，突出结果与量化指标，输出优化后的完整文本。\n\n"
-            f"简历原文:\n{text}"
+        prompt = self.prompt_manager.render_with_fallback(
+            "resume/optimize.md",
+            (
+                "你是资深HR，请使用 STAR 法则润色以下简历经历描述。"
+                "要求：保留事实，不要虚构，突出结果与量化指标，输出优化后的完整文本。\n\n"
+                "简历原文:\n{{ resume_text }}"
+            ),
+            resume_text=text,
         )
         optimized_content = self.llm_service.chat("RESUME_PARSING", prompt)
 
@@ -128,6 +146,13 @@ class ResumeService:
         filename = f"resume_{resume_id}_optimized.txt"
         return data, filename
 
+    async def preview_resume_pdf(self, db: AsyncSession, user: User, resume_id: int) -> tuple[bytes, str]:
+        resume = await self._get_user_resume(db, user.id, resume_id)
+        raw_data = self._read_resume_bytes(resume.file_url)
+        pdf_data = convert_resume_to_preview_pdf(resume.file_name, raw_data)
+        preview_name = f"resume_{resume.id}_preview.pdf"
+        return pdf_data, preview_name
+
     async def _get_user_resume(self, db: AsyncSession, user_id: int, resume_id: int) -> Resume:
         stmt = select(Resume).where(Resume.id == resume_id, Resume.user_id == user_id)
         result = await db.execute(stmt)
@@ -150,16 +175,17 @@ class ResumeService:
             "示例输出: {\"personal_info\": {\"name\": \"张三\", \"email\": \"zhangsan@example.com\", \"phone\": \"13812345678\"},"
             " \"education_experiences\": [], \"work_experiences\": [], \"project_experiences\": [], \"skills\": []}"
         )
-        prompt = PromptTemplate.from_template(
-            "你是简历结构化专家。请将简历文本转为结构化 JSON。\n"
-            "{few_shot_examples}\n\n"
-            "输出要求:\n{format_instructions}\n\n"
-            "简历文本:\n{text}"
-        )
-        formatted = prompt.format(
+        formatted = self.prompt_manager.render_with_fallback(
+            "resume/parse_structured.md",
+            (
+                "你是简历结构化专家。请将简历文本转为结构化 JSON。\n"
+                "{{ few_shot_examples }}\n\n"
+                "输出要求:\n{{ format_instructions }}\n\n"
+                "简历文本:\n{{ resume_text }}"
+            ),
             few_shot_examples=few_shot_examples,
             format_instructions=parser.get_format_instructions(),
-            text=text,
+            resume_text=text,
         )
 
         try:

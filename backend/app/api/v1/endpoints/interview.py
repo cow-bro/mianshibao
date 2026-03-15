@@ -59,6 +59,24 @@ async def get_interview_report(
     )
 
 
+@router.post("/sessions/{session_id}/end", summary="End interview session")
+async def end_interview_session(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> dict:
+    session = await service.get_owned_session(db, session_id=session_id, user_id=current_user.id)
+    state = await service.end_session(db=db, session=session, message="结束面试")
+    return success_response(
+        data={
+            "session_id": session.id,
+            "status": state["status"],
+            "current_stage": state["current_stage"].value,
+            "report_ready": state["status"] == "ENDED",
+        }
+    )
+
+
 @router.post("/{session_id}/human-intervention/enable", summary="Enable human intervention (reserved)")
 async def human_enable(session_id: int) -> None:
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=f"session {session_id}: not implemented")

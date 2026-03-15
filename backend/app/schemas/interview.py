@@ -18,6 +18,9 @@ class InterviewStage(str, Enum):
 
 
 class WebSocketMessageType(str, Enum):
+    ANSWER = "ANSWER"
+    SKIP = "SKIP"
+    END_INTERVIEW = "END_INTERVIEW"
     TOKEN = "token"
     MESSAGE = "message"
     STATE_CHANGE = "state_change"

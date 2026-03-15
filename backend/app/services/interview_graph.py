@@ -11,6 +11,7 @@ from app.providers.llm_factory import LLMService
 from app.providers.checkpointer import build_checkpointer
 from app.schemas.interview import InterviewReport, InterviewStage, InterviewState
 from app.services.knowledge_service import KnowledgeService
+from app.utils.prompt_manager import PromptManager
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class InterviewGraphService:
         self.llm_service = LLMService()
         self.knowledge_service = KnowledgeService()
         self.checkpointer = build_checkpointer()
+        self.prompt_manager = PromptManager()
 
     @staticmethod
     def now_iso() -> str:
@@ -200,14 +202,18 @@ class InterviewGraphService:
         return state
 
     def _ask_resume_question(self, state: InterviewState) -> None:
-        prompt = f"""
-你是{state['target_company']}的{state['target_position']}资深校招面试官，当前处于【简历深挖】阶段。
-候选人简历：{json.dumps(state['parsed_resume'], ensure_ascii=False)}
-目标岗位JD：{state['job_description']}
-当前简历深挖焦点：{state.get('current_resume_focus') or '请你先选择最匹配JD的项目或经历'}
-历史对话：{json.dumps(state['message_history'][-10:], ensure_ascii=False)}
-当前已问简历深挖题数：{state['resume_dig_question_count']}
-简历深挖题数上限：{state['max_resume_dig_questions']}
+        prompt = self.prompt_manager.render_with_fallback(
+            "interview/resume_dig_question.md",
+            """
+{{ interviewer_role }}
+
+你是{{ target_company }}的{{ target_position }}资深校招面试官，当前处于【简历深挖】阶段。
+候选人简历：{{ parsed_resume_json }}
+目标岗位JD：{{ job_description }}
+当前简历深挖焦点：{{ current_resume_focus }}
+历史对话：{{ history_json }}
+当前已问简历深挖题数：{{ resume_dig_question_count }}
+简历深挖题数上限：{{ max_resume_dig_questions }}
 
 请生成1个精准的追问问题，要求：
 1. 遵循STAR法则分层追问，不能重复；
@@ -217,7 +223,17 @@ class InterviewGraphService:
 5. 语气自然专业。
 
 只返回问题文本。
-""".strip()
+""",
+            interviewer_role=self._interviewer_role_prompt(),
+            target_company=state["target_company"],
+            target_position=state["target_position"],
+            parsed_resume_json=json.dumps(state["parsed_resume"], ensure_ascii=False),
+            job_description=state["job_description"],
+            current_resume_focus=state.get("current_resume_focus") or "请你先选择最匹配JD的项目或经历",
+            history_json=json.dumps(state["message_history"][-10:], ensure_ascii=False),
+            resume_dig_question_count=state["resume_dig_question_count"],
+            max_resume_dig_questions=state["max_resume_dig_questions"],
+        )
 
         question = self.llm_service.chat("INTERVIEW", prompt)
         state["current_stage"] = InterviewStage.RESUME_DIG
@@ -227,15 +243,19 @@ class InterviewGraphService:
 
     def _ask_tech_question(self, state: InterviewState) -> None:
         rag_points = state.get("rag_retrieved_knowledge") or []
-        prompt = f"""
-你是{state['target_company']}的{state['target_position']}资深校招面试官，当前处于【技术问答】阶段。
-目标岗位JD：{state['job_description']}
-核心技能栈（从JD提取）：{state.get('current_tech_stack_focus') or []}
-历史对话：{json.dumps(state['message_history'][-12:], ensure_ascii=False)}
-当前已问技术问答题数：{state['tech_qa_question_count']}
-技术问答题数上限：{state['max_tech_qa_questions']}
-当前难度趋势：{json.dumps(state['answer_quality_scores'][-4:], ensure_ascii=False)}
-RAG检索到的相关知识点：{json.dumps(rag_points, ensure_ascii=False)}
+        prompt = self.prompt_manager.render_with_fallback(
+            "interview/tech_qa_question.md",
+            """
+{{ interviewer_role }}
+
+你是{{ target_company }}的{{ target_position }}资深校招面试官，当前处于【技术问答】阶段。
+目标岗位JD：{{ job_description }}
+核心技能栈（从JD提取）：{{ tech_stack_focus_json }}
+历史对话：{{ history_json }}
+当前已问技术问答题数：{{ tech_qa_question_count }}
+技术问答题数上限：{{ max_tech_qa_questions }}
+当前难度趋势：{{ answer_quality_scores_json }}
+RAG检索到的相关知识点：{{ rag_points_json }}
 
 请生成1个精准的技术问题，要求：
 1. 基于JD核心技能栈和检索知识点，不要超纲；
@@ -244,7 +264,18 @@ RAG检索到的相关知识点：{json.dumps(rag_points, ensure_ascii=False)}
 4. 若候选人上题有漏洞可追问。
 
 只返回问题文本。
-""".strip()
+""",
+            interviewer_role=self._interviewer_role_prompt(),
+            target_company=state["target_company"],
+            target_position=state["target_position"],
+            job_description=state["job_description"],
+            tech_stack_focus_json=json.dumps(state.get("current_tech_stack_focus") or [], ensure_ascii=False),
+            history_json=json.dumps(state["message_history"][-12:], ensure_ascii=False),
+            tech_qa_question_count=state["tech_qa_question_count"],
+            max_tech_qa_questions=state["max_tech_qa_questions"],
+            answer_quality_scores_json=json.dumps(state["answer_quality_scores"][-4:], ensure_ascii=False),
+            rag_points_json=json.dumps(rag_points, ensure_ascii=False),
+        )
 
         question = self.llm_service.chat("INTERVIEW", prompt)
         state["current_stage"] = InterviewStage.TECH_QA
@@ -253,10 +284,14 @@ RAG检索到的相关知识点：{json.dumps(rag_points, ensure_ascii=False)}
         self._append_interviewer_message(state, question, InterviewStage.TECH_QA)
 
     def _generate_welcome(self, state: InterviewState) -> str:
-        prompt = f"""
-你是{state['target_company']}的{state['target_position']}资深校招面试官，现在开始一场模拟面试。
-候选人简历：{json.dumps(state['parsed_resume'], ensure_ascii=False)}
-岗位JD：{state['job_description']}
+        prompt = self.prompt_manager.render_with_fallback(
+            "interview/welcome.md",
+            """
+{{ interviewer_role }}
+
+你是{{ target_company }}的{{ target_position }}资深校招面试官，现在开始一场模拟面试。
+候选人简历：{{ parsed_resume_json }}
+岗位JD：{{ job_description }}
 
 请生成100字以内个性化开场：
 1. 亲切自然；
@@ -265,19 +300,36 @@ RAG检索到的相关知识点：{json.dumps(rag_points, ensure_ascii=False)}
 4. 询问是否准备好。
 
 只返回开场文本。
-""".strip()
+""",
+            interviewer_role=self._interviewer_role_prompt(),
+            target_company=state["target_company"],
+            target_position=state["target_position"],
+            parsed_resume_json=json.dumps(state["parsed_resume"], ensure_ascii=False),
+            job_description=state["job_description"],
+        )
         return self.llm_service.chat("INTERVIEW", prompt)
 
     def _generate_candidate_question_response(self, state: InterviewState, candidate_input: str) -> str:
-        prompt = f"""
-你是{state['target_company']}的{state['target_position']}资深校招面试官，当前处于【候选人反问】环节。
-历史对话：{json.dumps(state['message_history'][-12:], ensure_ascii=False)}
-候选人问题：{candidate_input}
-岗位JD：{state['job_description']}
+        prompt = self.prompt_manager.render_with_fallback(
+            "interview/candidate_question_response.md",
+            """
+{{ interviewer_role }}
+
+你是{{ target_company }}的{{ target_position }}资深校招面试官，当前处于【候选人反问】环节。
+历史对话：{{ history_json }}
+候选人问题：{{ candidate_input }}
+岗位JD：{{ job_description }}
 
 请给出专业、友好、真实的回答，不编造具体公司内部信息。回答后继续邀请候选人提问。
 只返回文本。
-""".strip()
+""",
+            interviewer_role=self._interviewer_role_prompt(),
+            target_company=state["target_company"],
+            target_position=state["target_position"],
+            history_json=json.dumps(state["message_history"][-12:], ensure_ascii=False),
+            candidate_input=candidate_input,
+            job_description=state["job_description"],
+        )
         return self.llm_service.chat("INTERVIEW", prompt)
 
     def _record_candidate_answer_if_needed(self, state: InterviewState) -> None:
@@ -346,27 +398,38 @@ RAG检索到的相关知识点：{json.dumps(rag_points, ensure_ascii=False)}
         return selected or ["Python", "系统设计"]
 
     def _generate_report(self, state: InterviewState) -> dict[str, Any]:
-        prompt = f"""
+        prompt = self.prompt_manager.render_with_fallback(
+            "interview/report_generation.md",
+            """
 你是资深校招面试评委，请基于信息生成JSON复盘报告。
-目标公司：{state['target_company']}
-目标岗位：{state['target_position']}
-面试时长：{state['interview_duration_seconds']}
-总题数：{state['current_question_index']}
-岗位JD：{state['job_description']}
-候选人简历：{json.dumps(state['parsed_resume'], ensure_ascii=False)}
-完整对话历史：{json.dumps(state['message_history'], ensure_ascii=False)}
-回答评分：{json.dumps(state['answer_quality_scores'], ensure_ascii=False)}
+目标公司：{{ target_company }}
+目标岗位：{{ target_position }}
+面试时长：{{ interview_duration_seconds }}
+总题数：{{ current_question_index }}
+岗位JD：{{ job_description }}
+候选人简历：{{ parsed_resume_json }}
+完整对话历史：{{ message_history_json }}
+回答评分：{{ answer_quality_scores_json }}
 
 JSON字段必须满足 InterviewReport 模型。
 只返回 JSON。
-""".strip()
+""",
+            target_company=state["target_company"],
+            target_position=state["target_position"],
+            interview_duration_seconds=state["interview_duration_seconds"],
+            current_question_index=state["current_question_index"],
+            job_description=state["job_description"],
+            parsed_resume_json=json.dumps(state["parsed_resume"], ensure_ascii=False),
+            message_history_json=json.dumps(state["message_history"], ensure_ascii=False),
+            answer_quality_scores_json=json.dumps(state["answer_quality_scores"], ensure_ascii=False),
+        )
 
         raw = self.llm_service.chat("INTERVIEW", prompt)
         try:
             parsed = json.loads(self._extract_json(raw))
             parsed.setdefault("generated_at", datetime.now(UTC).isoformat())
             report = InterviewReport(**parsed)
-            return report.model_dump()
+            return report.model_dump(mode="json")
         except Exception:
             logger.exception("Failed to parse report JSON, using fallback report")
 
@@ -405,7 +468,7 @@ JSON字段必须满足 InterviewReport 模型。
             ],
             interview_summary="候选人在基础技术和沟通方面表现稳定，但在原理深度与场景化权衡上仍有提升空间。",
             generated_at=datetime.now(UTC),
-        ).model_dump()
+        ).model_dump(mode="json")
 
     @staticmethod
     def _extract_json(text: str) -> str:
@@ -416,6 +479,12 @@ JSON字段必须满足 InterviewReport 模型。
         if not match:
             raise ValueError("no json body found")
         return match.group(0)
+
+    def _interviewer_role_prompt(self) -> str:
+        return self.prompt_manager.render_with_fallback(
+            "interviewer.txt",
+            "你是结构化面试官。请按阶段提问：自我介绍、项目追问、算法基础、系统设计、总结反馈。",
+        )
 
     @staticmethod
     def _score_answer(answer: str, stage: InterviewStage) -> float:

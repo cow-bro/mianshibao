@@ -17,7 +17,7 @@ interface InterviewState {
   setSessionId: (id: number | null) => void;
   addMessage: (msg: ChatMessage) => void;
   appendToken: (char: string) => void;
-  finalizeMessage: () => void;
+  finalizeMessage: (fallbackContent?: string) => void;
   setStage: (stage: string) => void;
   reset: () => void;
 }
@@ -37,14 +37,24 @@ export const useInterviewStore = create<InterviewState>((set, get) => ({
 
   appendToken: (char) => set((s) => ({ streamingContent: s.streamingContent + char })),
 
-  finalizeMessage: () => {
+  finalizeMessage: (fallbackContent) => {
     const { streamingContent } = get();
-    if (streamingContent) {
-      set((s) => ({
-        messages: [...s.messages, { role: "INTERVIEWER", content: streamingContent, timestamp: new Date().toISOString() }],
-        streamingContent: "",
-      }));
+    const nextContent = (streamingContent || fallbackContent || "").trim();
+    if (!nextContent) {
+      set({ streamingContent: "" });
+      return;
     }
+
+    set((s) => {
+      const last = s.messages[s.messages.length - 1];
+      const isDuplicate = last?.role === "INTERVIEWER" && last.content.trim() === nextContent;
+      return {
+        messages: isDuplicate
+          ? s.messages
+          : [...s.messages, { role: "INTERVIEWER", content: nextContent, timestamp: new Date().toISOString() }],
+        streamingContent: "",
+      };
+    });
   },
 
   setStage: (stage) => set({ currentStage: stage, isInterviewEnded: stage === "END" }),

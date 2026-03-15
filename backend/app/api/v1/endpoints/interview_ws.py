@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 
 from app.core.database import SessionLocal
 from app.schemas.interview import WebSocketMessageType
@@ -52,10 +53,18 @@ async def interview_ws(websocket: WebSocket) -> None:
             while True:
                 raw = await websocket.receive_text()
                 payload = _parse_client_payload(raw)
-                if payload.get("type") == WebSocketMessageType.PONG.value:
+                payload_type = str(payload.get("type") or "").strip()
+
+                if payload_type == WebSocketMessageType.PONG.value:
                     continue
 
-                message = str(payload.get("message") or "").strip()
+                if payload_type == WebSocketMessageType.END_INTERVIEW.value:
+                    message = "结束面试"
+                elif payload_type == WebSocketMessageType.SKIP.value:
+                    message = "跳过当前问题"
+                else:
+                    message = str(payload.get("message") or "").strip()
+
                 if not message:
                     continue
 
@@ -75,15 +84,17 @@ async def interview_ws(websocket: WebSocket) -> None:
 
                 if state["status"] == "ENDED":
                     await websocket.send_json(
-                        {
-                            "type": WebSocketMessageType.REPORT_READY.value,
-                            "data": {
-                                "session_id": state["session_id"],
-                                "summary": state.get("report", {}).get("interview_summary", ""),
-                                "report": state.get("report", {}),
-                            },
-                            "timestamp": datetime.now(UTC).isoformat(),
-                        }
+                        jsonable_encoder(
+                            {
+                                "type": WebSocketMessageType.REPORT_READY.value,
+                                "data": {
+                                    "session_id": state["session_id"],
+                                    "summary": state.get("report", {}).get("interview_summary", ""),
+                                    "report": state.get("report", {}),
+                                },
+                                "timestamp": datetime.now(UTC).isoformat(),
+                            }
+                        )
                     )
                     break
 
