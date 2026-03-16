@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_minutes: int = 60 * 24 * 7
     dashscope_api_key: str = ""
+    resume_score_timeout_seconds: int = 90
+    resume_score_max_chars: int = 7000
 
     llm_scenario_configs: dict[str, dict[str, Any]] = Field(
         default_factory=lambda: {

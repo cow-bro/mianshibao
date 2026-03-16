@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import api from "@/lib/http";
 import type { ApiResponse } from "@/lib/types";
@@ -33,6 +33,110 @@ interface ScoreResult {
 interface SuggestionCard {
   title?: string;
   content: string;
+}
+
+interface DimensionConfig {
+  label: string;
+  shortLabel: string;
+  weight: number;
+  aliases: string[];
+}
+
+interface DimensionRow {
+  label: string;
+  shortLabel: string;
+  weight: number;
+  score: number;
+  weightedContribution: number;
+}
+
+const DIMENSION_CONFIGS: DimensionConfig[] = [
+  {
+    label: "教育背景与学习潜力",
+    shortLabel: "教育潜力",
+    weight: 30,
+    aliases: ["教育背景", "学习潜力", "教育"],
+  },
+  {
+    label: "经历匹配度（实习 / 项目 / 校园）",
+    shortLabel: "经历匹配",
+    weight: 20,
+    aliases: ["经历匹配度", "匹配度", "实习 / 项目 / 校园", "实习项目校园"],
+  },
+  {
+    label: "经历含金量与成果价值",
+    shortLabel: "经历价值",
+    weight: 20,
+    aliases: ["含金量", "成果价值", "成果", "经历含金量"],
+  },
+  {
+    label: "技能相关性",
+    shortLabel: "技能相关",
+    weight: 15,
+    aliases: ["技能"],
+  },
+  {
+    label: "岗位适配性与发展潜力",
+    shortLabel: "岗位适配",
+    weight: 10,
+    aliases: ["岗位适配", "发展潜力", "岗位适配性"],
+  },
+  {
+    label: "信息完整性与支撑度",
+    shortLabel: "信息完整",
+    weight: 3,
+    aliases: ["信息完整性", "完整性", "支撑度"],
+  },
+  {
+    label: "排版规范性与 ATS 适配性",
+    shortLabel: "排版ATS",
+    weight: 2,
+    aliases: ["排版规范性", "ATS", "排版", "排版规范性与ATS适配性"],
+  },
+];
+
+function clampScore(value: number): number {
+  return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+}
+
+function normalizeScoreLabel(text: string): string {
+  return text.replace(/\s+/g, "").replace(/[（）()]/g, "").toLowerCase();
+}
+
+function normalizeDimensionScores(raw: Record<string, number> | undefined): Record<string, number> {
+  if (!raw) return {};
+
+  const normalizedRawEntries = Object.entries(raw).map(([key, value]) => ({
+    key,
+    normalizedKey: normalizeScoreLabel(key),
+    value: clampScore(Number(value)),
+  }));
+
+  const result: Record<string, number> = {};
+
+  for (const cfg of DIMENSION_CONFIGS) {
+    const candidateTokens = [cfg.label, ...cfg.aliases].map(normalizeScoreLabel);
+    const exact = normalizedRawEntries.find((entry) => candidateTokens.includes(entry.normalizedKey));
+    if (exact) {
+      result[cfg.label] = exact.value;
+      continue;
+    }
+
+    const fuzzy = normalizedRawEntries.find((entry) =>
+      candidateTokens.some((token) => token.includes(entry.normalizedKey) || entry.normalizedKey.includes(token))
+    );
+    if (fuzzy) {
+      result[cfg.label] = fuzzy.value;
+    }
+  }
+
+  return result;
+}
+
+function getPriority(score: number): string {
+  if (score < 60) return "高优先级";
+  if (score < 75) return "中优先级";
+  return "低优先级";
 }
 
 function getActionErrorMessage(error: unknown, fallback: string): string {
@@ -217,7 +321,9 @@ export default function ResumePage() {
     if (!resumeId) return;
     setScoring(true);
     try {
-      const res = await api.post<ApiResponse<ScoreResult>>(`/resumes/${resumeId}/score`);
+      const res = await api.post<ApiResponse<ScoreResult>>(`/resumes/${resumeId}/score`, undefined, {
+        timeout: 90000,
+      });
       setScoreResult(res.data.data);
       toast({ title: "评分完成" });
     } catch (error: unknown) {
@@ -262,12 +368,44 @@ export default function ResumePage() {
     if (file) handleUpload(file);
   };
 
-  const radarData = scoreResult
-    ? Object.entries(scoreResult.dimension_scores).map(([name, value]) => ({ dimension: name, score: value }))
-    : [];
+  const normalizedDimensionScores = useMemo(
+    () => normalizeDimensionScores(scoreResult?.dimension_scores),
+    [scoreResult]
+  );
+
+  const dimensionRows: DimensionRow[] = useMemo(() => {
+    if (!scoreResult) return [];
+
+    return DIMENSION_CONFIGS.map((cfg) => {
+      const score = clampScore(Number(normalizedDimensionScores[cfg.label] ?? 0));
+      const weightedContribution = Number(((score * cfg.weight) / 100).toFixed(1));
+      return {
+        label: cfg.label,
+        shortLabel: cfg.shortLabel,
+        weight: cfg.weight,
+        score,
+        weightedContribution,
+      };
+    });
+  }, [normalizedDimensionScores, scoreResult]);
+
+  const radarData = dimensionRows.map((item) => ({
+    dimension: item.shortLabel,
+    fullDimension: item.label,
+    score: item.score,
+  }));
+
   const suggestionCards = scoreResult
-    ? buildSuggestionCards(scoreResult.suggestions, Object.keys(scoreResult.dimension_scores))
+    ? buildSuggestionCards(
+        scoreResult.suggestions,
+        DIMENSION_CONFIGS.map((cfg) => cfg.label)
+      )
     : [];
+
+  const weakestDimensions = useMemo(
+    () => [...dimensionRows].sort((a, b) => a.score - b.score),
+    [dimensionRows]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -453,27 +591,59 @@ export default function ResumePage() {
                             <Radar
                               name="评分"
                               dataKey="score"
-                              stroke="hsl(var(--foreground))"
-                              fill="hsl(var(--foreground))"
-                              fillOpacity={0.1}
+                              stroke="hsl(var(--primary))"
+                              fill="hsl(var(--primary))"
+                              fillOpacity={0.22}
                             />
                           </RadarChart>
                         </ResponsiveContainer>
                       </div>
                       <div className="flex-1 w-full">
-                        <p className="text-5xl font-bold">{scoreResult.overall_score}</p>
+                        <p className="text-5xl font-bold">{Number(scoreResult.overall_score).toFixed(1)}</p>
                         <p className="text-sm text-muted-foreground mt-1">综合评分</p>
-                        <div className="mt-4 space-y-2">
-                          {Object.entries(scoreResult.dimension_scores).map(([k, v]) => (
-                            <div key={k} className="flex justify-between text-sm">
-                              <span>{k}</span>
-                              <span className="font-medium">{v}</span>
+                        <div className="mt-4 space-y-3">
+                          {dimensionRows.map((row) => (
+                            <div key={row.label} className="space-y-1.5">
+                              <div className="flex justify-between text-sm gap-3">
+                                <span className="truncate" title={row.label}>
+                                  {row.label}
+                                </span>
+                                <span className="font-medium whitespace-nowrap">{row.score.toFixed(1)} 分</span>
+                              </div>
+                              <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                                <div
+                                  className="h-full rounded-full bg-primary transition-all"
+                                  style={{ width: `${row.score}%` }}
+                                />
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                权重 {row.weight}% · 加权贡献 {row.weightedContribution}
+                              </p>
                             </div>
                           ))}
                         </div>
                       </div>
                     </div>
                   </div>
+
+                  {weakestDimensions.length > 0 && (
+                    <div className="rounded-xl border border-border/60 bg-card p-4">
+                      <h3 className="text-lg font-medium">短板优先级</h3>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                        {weakestDimensions.slice(0, 3).map((row) => (
+                          <div key={row.label} className="rounded-lg border border-border/60 p-3 bg-muted/30">
+                            <p className="text-sm font-medium line-clamp-1" title={row.label}>
+                              {row.label}
+                            </p>
+                            <p className="text-2xl font-semibold mt-1">{row.score.toFixed(1)}</p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {getPriority(row.score)} · 权重 {row.weight}%
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {suggestionCards.length > 0 && (
                     <div className="space-y-3">
@@ -485,6 +655,15 @@ export default function ResumePage() {
                           </span>
                           <div className="space-y-1">
                             {card.title && <p className="text-sm font-medium">{card.title}</p>}
+                            {card.title && (
+                              <p className="text-xs text-muted-foreground">
+                                {(() => {
+                                  const matched = dimensionRows.find((row) => row.label === card.title);
+                                  if (!matched) return "";
+                                  return `${getPriority(matched.score)} · 当前分 ${matched.score.toFixed(1)} · 权重 ${matched.weight}%`;
+                                })()}
+                              </p>
+                            )}
                             <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{card.content}</p>
                           </div>
                         </div>
