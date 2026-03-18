@@ -1,7 +1,7 @@
 import enum
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Enum, String, Text
+from sqlalchemy import Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -47,6 +47,12 @@ class KnowledgePoint(Base, BaseModelMixin):
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_company: Mapped[str | None] = mapped_column(String(100), nullable=True)
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String(50)), nullable=True)
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("knowledge_category.id", ondelete="SET NULL"), nullable=True
+    )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("user.id", ondelete="CASCADE"), nullable=True
+    )
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     search_vector = mapped_column(TSVECTOR, nullable=True)
 
@@ -55,4 +61,12 @@ class KnowledgePoint(Base, BaseModelMixin):
     )
     position_links = relationship(
         "PositionKnowledge", back_populates="knowledge_point", cascade="all, delete-orphan"
+    )
+    category_ref = relationship("KnowledgeCategory", back_populates="knowledge_points")
+    owner = relationship("User", back_populates="personal_knowledge_points")
+    bookmarks = relationship(
+        "KnowledgeBookmark", back_populates="knowledge_point", cascade="all, delete-orphan"
+    )
+    learning_progress = relationship(
+        "KnowledgeLearningProgress", back_populates="knowledge_point", cascade="all, delete-orphan"
     )

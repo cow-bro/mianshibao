@@ -544,6 +544,8 @@ export default function ResumePage() {
                   {scoring && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
                   评分分析
                 </Button>
+                {/* 暂时注释 AI 优化卡片入口，不影响优化相关 API 与处理逻辑 */}
+                {/**
                 <Button
                   className="w-full justify-start"
                   variant="outline"
@@ -559,6 +561,7 @@ export default function ResumePage() {
                     下载优化版
                   </Button>
                 )}
+                */}
               </div>
             </aside>
 

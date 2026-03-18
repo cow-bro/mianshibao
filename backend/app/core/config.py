@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     llm_scenario_configs: dict[str, dict[str, Any]] = Field(
         default_factory=lambda: {
-            "RESUME_PARSING": {"provider": "qwen", "model": "qwen-plus", "temperature": 0.1},
+            "RESUME_PARSING": {"provider": "qwen", "model": "qwen-max", "temperature": 0.0},
             "INTERVIEW": {"provider": "qwen", "model": "qwen-max", "temperature": 0.7},
             "RAG": {"provider": "qwen", "model": "qwen-plus", "temperature": 0.3},
             "DEFAULT": {"provider": "fallback", "model": "fallback", "temperature": 0.5},

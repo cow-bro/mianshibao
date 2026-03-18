@@ -1,6 +1,9 @@
 from app.models.interview_message import InterviewMessage, InterviewMessageRole
 from app.models.interview_report import InterviewReport
 from app.models.interview_session import InterviewSession, InterviewStatus
+from app.models.knowledge_bookmark import KnowledgeBookmark
+from app.models.knowledge_category import KnowledgeCategory
+from app.models.knowledge_learning_progress import KnowledgeLearningProgress, LearningStatus
 from app.models.job_category import JobCategory
 from app.models.job_position import JobPosition, PositionLevel
 from app.models.knowledge_point import DifficultyLevel, KnowledgePoint, KnowledgePointType, KnowledgeScope
@@ -19,6 +22,10 @@ __all__ = [
 	"InterviewStatus",
 	"JobCategory",
 	"JobPosition",
+	"KnowledgeBookmark",
+	"KnowledgeCategory",
+	"KnowledgeLearningProgress",
+	"LearningStatus",
 	"KnowledgePoint",
 	"KnowledgePointType",
 	"KnowledgeRelevance",

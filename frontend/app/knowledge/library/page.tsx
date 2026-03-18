@@ -1,13 +1,12 @@
-﻿"use client";
+"use client";
 
 import KnowledgeWorkspace from "../_components/KnowledgeWorkspace";
 
-export default function PositionKnowledgePage() {
+export default function PersonalLibraryPage() {
   return (
     <KnowledgeWorkspace
-      title="岗位知识库学习"
-      scope="POSITION"
-      visibility="BOTH"
+      title="个人资料库学习"
+      visibility="PRIVATE"
       allowUpload={true}
       backHref="/knowledge"
     />

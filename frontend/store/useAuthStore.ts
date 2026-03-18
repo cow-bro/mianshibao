@@ -11,6 +11,7 @@ interface AuthState {
   setTokens: (accessToken: string, refreshToken: string) => void;
   clear: () => void;
   login: (username: string, password: string) => Promise<void>;
+  registerByPhone: (phone: string, password: string, smsCode?: string) => Promise<void>;
   logout: () => void;
   hydrate: () => void;
 }
@@ -52,6 +53,21 @@ export const useAuthStore = create<AuthState>((set) => ({
     } catch {
       set({ accessToken: access_token, refreshToken: refresh_token, username });
     }
+  },
+
+  registerByPhone: async (phone: string, password: string, smsCode?: string) => {
+    const res = await api.post<ApiResponse<TokenPair & { user_id: number; username: string; phone: string }>>(
+      "/auth/register/phone",
+      { phone, password, sms_code: smsCode }
+    );
+    const { access_token, refresh_token, user_id, username } = res.data.data;
+    tokenStore.setTokens(access_token, refresh_token);
+    set({
+      accessToken: access_token,
+      refreshToken: refresh_token,
+      userId: user_id,
+      username,
+    });
   },
 
   logout: () => {

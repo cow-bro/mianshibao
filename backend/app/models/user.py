@@ -36,3 +36,12 @@ class User(Base, BaseModelMixin):
     wrong_questions = relationship(
         "WrongQuestion", back_populates="user", cascade="all, delete-orphan"
     )
+    personal_knowledge_points = relationship(
+        "KnowledgePoint", back_populates="owner", cascade="all, delete-orphan"
+    )
+    knowledge_bookmarks = relationship(
+        "KnowledgeBookmark", back_populates="user", cascade="all, delete-orphan"
+    )
+    knowledge_learning_progress = relationship(
+        "KnowledgeLearningProgress", back_populates="user", cascade="all, delete-orphan"
+    )

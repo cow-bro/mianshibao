@@ -77,6 +77,9 @@ api.interceptors.response.use(
     } catch (refreshError) {
       tokenStore.clear();
       flushQueue(null);
+      if (typeof window !== "undefined") {
+        window.location.href = "/login";
+      }
       return Promise.reject(refreshError);
     } finally {
       isRefreshing = false;

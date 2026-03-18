@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
 
 from fastapi import UploadFile
-from langchain_core.output_parsers import PydanticOutputParser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,9 +18,12 @@ from app.models.resume import Resume
 from app.models.user import User
 from app.providers.llm_factory import LLMService
 from app.providers.storage import download_bytes, upload_bytes
-from app.schemas.resume import ResumeOptimizeResult, ResumeScoreResult, ResumeStructured
+from app.schemas.resume import ResumeOptimizeResult, ResumeScoreResult
 from app.utils.file_parser import convert_resume_to_preview_pdf, parse_resume_file
 from app.utils.prompt_manager import PromptManager
+
+
+logger = logging.getLogger(__name__)
 
 
 class ResumeService:
@@ -103,31 +106,39 @@ class ResumeService:
 
     async def parse_resume(self, db: AsyncSession, user: User, resume_id: int) -> dict:
         resume = await self._get_user_resume(db, user.id, resume_id)
-        raw_bytes = self._read_resume_bytes(resume.file_url)
-        try:
-            parsed = parse_resume_file(resume.file_name, raw_bytes)
-        except Exception as exc:
-            raise AppException("resume parse failed", code=2002) from exc
-        text = parsed.get("text", "").strip()
-        if not text:
-            raise AppException("resume text extraction failed", code=2002)
+        text, parsed = self._extract_resume_text(resume)
+        summary = self._build_structured_summary(text)
 
-        structured = self._extract_structured_with_dual_engine(text)
-        resume.parsed_content = structured
+        parsed_payload = {
+            "文档信息": {
+                "文件名": resume.file_name,
+                "原始格式": parsed.get("suffix", ""),
+                "解析模式": parsed.get("mode", ""),
+                "文本长度": len(text),
+            },
+            "结构化摘要": summary,
+        }
+
+        resume.parsed_content = parsed_payload
         await db.commit()
-        return structured
+        return parsed_payload
 
     async def score_resume(self, db: AsyncSession, user: User, resume_id: int) -> ResumeScoreResult:
         resume = await self._get_user_resume(db, user.id, resume_id)
-        text = self._resume_text_for_score(resume)
+        text, summary_text = self._score_inputs(resume)
         timeout_sec = max(30, int(self.settings.resume_score_timeout_seconds))
         reduced_text = text[: max(1600, int(self.settings.resume_score_max_chars * 0.55))]
-        candidate_texts = [text, reduced_text]
+        minimal_text = text[: max(1100, int(self.settings.resume_score_max_chars * 0.35))]
+        candidate_texts = [text, reduced_text, minimal_text]
 
         result: ResumeScoreResult | None = None
+        last_error: Exception | None = None
         for idx, candidate_text in enumerate(candidate_texts):
             current_timeout = timeout_sec if idx == 0 else max(timeout_sec, 120)
-            prompt = self._render_score_prompt(candidate_text)
+            if idx < 2:
+                prompt = self._render_score_prompt(candidate_text, summary_text)
+            else:
+                prompt = self._render_score_prompt_minimal(candidate_text)
             try:
                 raw = await asyncio.wait_for(
                     asyncio.to_thread(self.llm_service.chat, "RESUME_PARSING", prompt),
@@ -135,11 +146,20 @@ class ResumeService:
                 )
                 result = self._parse_score_json(raw, resume_text=candidate_text)
                 break
-            except Exception:
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "resume score attempt failed: attempt=%s timeout=%s err=%s",
+                    idx + 1,
+                    current_timeout,
+                    repr(exc),
+                )
                 continue
 
         if result is None:
             # Return deterministic fallback only when both attempts failed.
+            if last_error is not None:
+                logger.error("resume score fallback triggered after retries: %s", str(last_error))
             result = self._build_timeout_fallback_result(text)
 
         resume.overall_score = result.overall_score
@@ -148,17 +168,29 @@ class ResumeService:
         await db.commit()
         return result
 
-    def _render_score_prompt(self, resume_text: str) -> str:
+    def _render_score_prompt(self, resume_text: str, resume_summary: str) -> str:
         return self.prompt_manager.render_with_fallback(
             "resume/score.md",
             (
                 "你是资深HR，请根据以下简历内容，按7个维度打分（0-100）并给出可执行修改建议。\n"
+                "输入优先级：先使用简历原文证据，再参考结构化摘要定位信息，不得用摘要覆盖原文事实。\n"
                 "请严格输出 JSON，禁止输出 JSON 以外内容。\n"
                 "JSON 格式:\n"
                 "{\"overall_score\": 0-100, \"dimension_scores\": {\"教育背景与学习潜力\": 0-100, \"经历匹配度（实习 / 项目 / 校园）\": 0-100, \"经历含金量与成果价值\": 0-100, \"技能相关性\": 0-100, \"岗位适配性与发展潜力\": 0-100, \"信息完整性与支撑度\": 0-100, \"排版规范性与 ATS 适配性\": 0-100}, \"suggestions\": \"1. 教育背景与学习潜力：...\\n2. 经历匹配度（实习 / 项目 / 校园）：...\\n3. 经历含金量与成果价值：...\\n4. 技能相关性：...\\n5. 岗位适配性与发展潜力：...\\n6. 信息完整性与支撑度：...\\n7. 排版规范性与 ATS 适配性：...\"}\n\n"
-                "简历内容:\n{{ resume_text }}"
+                "简历原文:\n{{ resume_text }}\n\n"
+                "结构化摘要（仅用于定位，不可覆盖原文）:\n{{ resume_summary }}"
             ),
             resume_text=resume_text,
+            resume_summary=resume_summary,
+        )
+
+    def _render_score_prompt_minimal(self, resume_text: str) -> str:
+        return (
+            "你是资深HR，请仅输出JSON，不要解释。"
+            "按7个维度给0-100分并给可执行建议。"
+            "JSON格式："
+            "{\"overall_score\":number,\"dimension_scores\":{\"教育背景与学习潜力\":number,\"经历匹配度（实习 / 项目 / 校园）\":number,\"经历含金量与成果价值\":number,\"技能相关性\":number,\"岗位适配性与发展潜力\":number,\"信息完整性与支撑度\":number,\"排版规范性与 ATS 适配性\":number},\"suggestions\":\"...\"}"
+            f"\n简历原文:\n{resume_text}"
         )
 
     async def optimize_resume(self, db: AsyncSession, user: User, resume_id: int) -> ResumeOptimizeResult:
@@ -225,119 +257,178 @@ class ResumeService:
             raise AppException("invalid file url", code=2005) from exc
         return download_bytes(bucket_name, object_name)
 
-    def _extract_structured_with_dual_engine(self, text: str) -> dict:
-        parser = PydanticOutputParser(pydantic_object=ResumeStructured)
-        few_shot_examples = (
-            "示例输入: 张三, zhangsan@example.com, 13812345678, 本科计算机\n"
-            "示例输出: {\"personal_info\": {\"name\": \"张三\", \"email\": \"zhangsan@example.com\", \"phone\": \"13812345678\"},"
-            " \"education_experiences\": [], \"work_experiences\": [], \"project_experiences\": [], \"skills\": []}"
-        )
-        formatted = self.prompt_manager.render_with_fallback(
-            "resume/parse_structured.md",
-            (
-                "你是简历结构化专家。请将简历文本转为结构化 JSON。\n"
-                "{{ few_shot_examples }}\n\n"
-                "输出要求:\n{{ format_instructions }}\n\n"
-                "简历文本:\n{{ resume_text }}"
-            ),
-            few_shot_examples=few_shot_examples,
-            format_instructions=parser.get_format_instructions(),
-            resume_text=text,
-        )
-
+    def _extract_resume_text(self, resume: Resume) -> tuple[str, dict]:
+        raw_bytes = self._read_resume_bytes(resume.file_url)
         try:
-            response = self.llm_service.chat("RESUME_PARSING", formatted)
-            structured = parser.parse(response)
-            return structured.model_dump()
-        except Exception:
-            # Rule-based fallback keeps minimal usable info.
-            return self._rule_based_extract(text)
+            parsed = parse_resume_file(resume.file_name, raw_bytes)
+        except Exception as exc:
+            raise AppException("resume parse failed", code=2002) from exc
 
-    def _rule_based_extract(self, text: str) -> dict:
-        email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-        phone_match = re.search(r"(?:\+?86[-\s]?)?1[3-9]\d{9}", text)
-        return ResumeStructured(
-            personal_info={
-                "name": None,
-                "email": email_match.group(0) if email_match else None,
-                "phone": phone_match.group(0) if phone_match else None,
-                "summary": None,
-            },
-            education_experiences=[],
-            work_experiences=[],
-            project_experiences=[],
-            skills=[],
-        ).model_dump()
+        text = str(parsed.get("text", "")).strip()
+        if not text:
+            raise AppException("resume text extraction failed", code=2002)
+        return text, parsed
 
     def _resume_text_for_llm(self, resume: Resume) -> str:
-        if resume.parsed_content:
-            return json.dumps(resume.parsed_content, ensure_ascii=False)
+        text, _ = self._extract_resume_text(resume)
+        return text
 
-        raw_bytes = self._read_resume_bytes(resume.file_url)
-        parsed = parse_resume_file(resume.file_name, raw_bytes)
-        return str(parsed.get("text", ""))
+    def _score_inputs(self, resume: Resume) -> tuple[str, str]:
+        text, _ = self._extract_resume_text(resume)
+        main_text = text[: self.settings.resume_score_max_chars]
 
-    def _resume_text_for_score(self, resume: Resume) -> str:
         parsed = dict(resume.parsed_content or {})
-        if not parsed:
-            raw_text = self._resume_text_for_llm(resume)
-            return raw_text[: self.settings.resume_score_max_chars]
+        summary = parsed.get("结构化摘要") if isinstance(parsed, dict) else None
+        if not isinstance(summary, dict):
+            summary = self._build_structured_summary(text)
+        summary_text = self._summary_to_text(summary)
+        return main_text, summary_text
 
-        compact = {
-            "personal_info": parsed.get("personal_info", {}),
-            "education_experiences": self._compact_items(parsed.get("education_experiences"), limit=3),
-            "work_experiences": self._compact_items(parsed.get("work_experiences"), limit=3),
-            "project_experiences": self._compact_items(parsed.get("project_experiences"), limit=3),
-            "skills": self._compact_items(parsed.get("skills"), limit=25),
+    def _build_structured_summary(self, text: str) -> dict:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        compact_lines = lines[:120]
+
+        email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+        phone_match = re.search(r"(?:\+?86[-\s]?)?1[3-9]\d{9}", text)
+        name_match = re.search(r"(?m)^(?:姓名[:：]\s*)?([\u4e00-\u9fa5]{2,4})\b", text)
+
+        sections = self._split_sections(compact_lines)
+        skills = self._extract_skills(text)
+
+        return {
+            "个人信息": {
+                "姓名": name_match.group(1) if name_match else None,
+                "邮箱": email_match.group(0) if email_match else None,
+                "电话": phone_match.group(0) if phone_match else None,
+            },
+            "教育经历": sections.get("教育经历", [])[:4],
+            "工作/实习经历": sections.get("工作/实习经历", [])[:5],
+            "项目经历": sections.get("项目经历", [])[:6],
+            "技能关键词": skills[:20],
         }
-        text = json.dumps(compact, ensure_ascii=False)
-        return text[: self.settings.resume_score_max_chars]
 
-    def _compact_items(self, value: object, limit: int) -> list | object:
-        if isinstance(value, list):
-            items = value[:limit]
-            return [self._compact_items(item, limit=4) for item in items]
-        if isinstance(value, dict):
-            compact: dict[str, object] = {}
-            for key, val in value.items():
-                if key in {"optimized_file_url", "optimized_content_preview"}:
-                    continue
-                compact[key] = self._compact_items(val, limit=4)
-            return compact
-        if isinstance(value, str):
-            return value[:280]
-        return value
+    def _split_sections(self, lines: list[str]) -> dict[str, list[str]]:
+        buckets: dict[str, list[str]] = {
+            "教育经历": [],
+            "工作/实习经历": [],
+            "项目经历": [],
+        }
+        current = "项目经历"
+
+        for line in lines:
+            lower = line.lower()
+            if any(k in line for k in ["教育", "学历", "学校", "院校"]):
+                current = "教育经历"
+                continue
+            if any(k in line for k in ["实习", "工作", "任职", "公司", "经历"]):
+                current = "工作/实习经历"
+                continue
+            if any(k in line for k in ["项目", "课题", "系统", "平台", "作品"]):
+                current = "项目经历"
+                continue
+
+            if len(line) <= 1:
+                continue
+            if re.fullmatch(r"[-_—=]+", line):
+                continue
+            if "http" in lower and len(line) > 90:
+                continue
+
+            buckets[current].append(line)
+
+        return buckets
+
+    def _extract_skills(self, text: str) -> list[str]:
+        candidates = re.split(r"[\n,，;；、/| ]+", text)
+        allow = re.compile(r"^[A-Za-z0-9+#._-]{2,24}$")
+        seen: set[str] = set()
+        result: list[str] = []
+        for token in candidates:
+            skill = token.strip()
+            if not skill:
+                continue
+            if not allow.fullmatch(skill):
+                continue
+            low = skill.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            result.append(skill)
+        return result
+
+    def _summary_to_text(self, summary: dict) -> str:
+        if not summary:
+            return "无结构化摘要"
+
+        parts: list[str] = []
+        personal = summary.get("个人信息", {}) if isinstance(summary, dict) else {}
+        if isinstance(personal, dict):
+            kv = [f"{k}:{v}" for k, v in personal.items() if v]
+            if kv:
+                parts.append("个人信息: " + " | ".join(kv))
+
+        for key in ["教育经历", "工作/实习经历", "项目经历"]:
+            values = summary.get(key, []) if isinstance(summary, dict) else []
+            if isinstance(values, list) and values:
+                parts.append(f"{key}: " + " || ".join(str(v) for v in values[:4]))
+
+        skills = summary.get("技能关键词", []) if isinstance(summary, dict) else []
+        if isinstance(skills, list) and skills:
+            parts.append("技能关键词: " + ", ".join(str(v) for v in skills[:15]))
+
+        return "\n".join(parts) if parts else "无结构化摘要"
 
     def _parse_score_json(self, content: str, resume_text: str) -> ResumeScoreResult:
-        try:
-            payload = self._extract_json(content)
-            normalized_scores = self._normalize_dimension_scores(payload.get("dimension_scores", {}))
+        payload = self._extract_json(content)
+        normalized_scores = self._normalize_dimension_scores(payload.get("dimension_scores", {}))
+
+        overall_raw = payload.get("overall_score")
+        if overall_raw is None:
             overall = self._weighted_overall(normalized_scores)
-            llm_suggestions = str(payload.get("suggestions", "")).strip()
-            suggestions = self._compose_rubric_suggestions(normalized_scores, llm_suggestions)
-            return ResumeScoreResult(
-                overall_score=overall,
-                dimension_scores=normalized_scores,
-                suggestions=suggestions,
-            )
-        except Exception:
-            return self._build_timeout_fallback_result(resume_text)
+        else:
+            overall = round(max(0.0, min(100.0, float(overall_raw))), 1)
+
+        suggestions = str(payload.get("suggestions", "")).strip()
+        if not suggestions:
+            raise ValueError("llm suggestions missing in score payload")
+
+        return ResumeScoreResult(
+            overall_score=overall,
+            dimension_scores=normalized_scores,
+            suggestions=suggestions,
+        )
+
+    @staticmethod
+    def _clean_suggestion_text(content: str) -> str:
+        text = content.strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+        return text.strip()
 
     def _extract_json(self, content: str) -> dict:
+        cleaned = self._sanitize_json_text(content)
         try:
-            return json.loads(content)
+            return json.loads(cleaned)
         except Exception:
             pass
 
-        match = re.search(r"\{[\s\S]*\}", content)
+        match = re.search(r"\{[\s\S]*\}", cleaned)
         if not match:
             raise ValueError("json not found")
-        return json.loads(match.group(0))
+        body = self._sanitize_json_text(match.group(0))
+        return json.loads(body)
+
+    @staticmethod
+    def _sanitize_json_text(content: str) -> str:
+        # Remove illegal control chars that frequently appear in OCR/model outputs.
+        # Keep CR/LF/TAB for readability and parser compatibility.
+        return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", content)
 
     def _normalize_dimension_scores(self, scores: object) -> dict[str, float]:
         if not isinstance(scores, dict):
             scores = {}
-        normalized: dict[str, float] = {name: 70.0 for name in self.SCORE_DIMENSIONS}
+        # Keep missing dimensions as 0 to avoid injecting non-LLM defaults.
+        normalized: dict[str, float] = {name: 0.0 for name in self.SCORE_DIMENSIONS}
         for key, value in scores.items():
             key_text = str(key).strip()
             key_norm = self._normalize_label(key_text)
@@ -374,75 +465,11 @@ class ResumeService:
         return ResumeScoreResult(
             overall_score=self._weighted_overall(dimension_scores),
             dimension_scores=dimension_scores,
-            suggestions=self._compose_rubric_suggestions(dimension_scores, ""),
+            suggestions="评分服务当前不可用，请稍后重试。",
         )
-
-    def _compose_rubric_suggestions(self, dimension_scores: dict[str, float], llm_suggestions: str) -> str:
-        llm_map = self._extract_dimension_suggestion_map(llm_suggestions)
-        lines: list[str] = []
-
-        for idx, dim in enumerate(self.SCORE_DIMENSIONS, start=1):
-            score_100 = float(dimension_scores.get(dim, 70.0))
-            action = self._default_action_by_score(dim, score_100)
-            llm_note = llm_map.get(dim, "").strip()
-            if llm_note:
-                llm_note = re.sub(rf"^\s*{re.escape(dim)}\s*[：:]\s*", "", llm_note)
-                llm_note = llm_note[:220]
-                action = llm_note
-
-            lines.append(
-                f"{idx}. {dim}：得分说明：{score_100:.1f}/100。"
-                f"核心优势/扣分项：{self._score_brief(score_100)}。"
-                f"优化建议：{action}"
-            )
-
-        return "\n".join(lines)
 
     @staticmethod
     def _normalize_label(text: str) -> str:
         return re.sub(r"[\s（）()/_-]+", "", text).lower()
 
-    @staticmethod
-    def _score_brief(score_100: float) -> str:
-        if score_100 >= 85:
-            return "当前维度表现较强，建议重点保留并补充更有竞争力的量化证据"
-        if score_100 >= 70:
-            return "当前维度达到可用水平，但存在关键说服力不足"
-        if score_100 >= 60:
-            return "当前维度偏弱，已影响整体竞争力"
-        return "当前维度明显短板，建议优先整改"
-
-    @staticmethod
-    def _default_action_by_score(dim: str, score_100: float) -> str:
-        if score_100 >= 85:
-            return f"保留该维度强项表达，补充1-2个更高含金量的量化成果，并与目标岗位能力要求建立直接映射。"
-        if score_100 >= 70:
-            return f"围绕{dim}补齐证据链，至少增加1条可验证成果数据，并将描述改为STAR闭环。"
-        if score_100 >= 60:
-            return f"优先重写{dim}相关内容，删除空泛表述，补充时间、角色、动作、结果四要素。"
-        return f"将{dim}作为最高优先级整改项，先补全事实信息，再增加强相关的实践与量化结果。"
-
-    def _extract_dimension_suggestion_map(self, text: str) -> dict[str, str]:
-        if not text:
-            return {}
-
-        points: list[tuple[int, str]] = []
-        for dim in self.SCORE_DIMENSIONS:
-            match = re.search(rf"{re.escape(dim)}\s*[：:]", text)
-            if match:
-                points.append((match.start(), dim))
-
-        if not points:
-            return {}
-
-        points.sort(key=lambda item: item[0])
-        result: dict[str, str] = {}
-        for idx, (start, dim) in enumerate(points):
-            end = points[idx + 1][0] if idx + 1 < len(points) else len(text)
-            segment = text[start:end].strip()
-            cleaned = re.sub(r"^\s*\d+[.、)）]\s*", "", segment)
-            cleaned = re.sub(rf"^\s*{re.escape(dim)}\s*[：:]\s*", "", cleaned).strip()
-            if cleaned:
-                result[dim] = cleaned
-        return result
 

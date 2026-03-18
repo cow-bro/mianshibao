@@ -8,19 +8,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
+import api from "@/lib/http";
 
 export default function LoginPage() {
   const router = useRouter();
   const { toast } = useToast();
   const login = useAuthStore((s) => s.login);
+  const registerByPhone = useAuthStore((s) => s.registerByPhone);
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
-  const [regUsername, setRegUsername] = useState("");
+  const [regPhone, setRegPhone] = useState("");
+  const [regCode, setRegCode] = useState("");
   const [regPassword, setRegPassword] = useState("");
   const [regConfirm, setRegConfirm] = useState("");
+  const [regLoading, setRegLoading] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,13 +43,42 @@ export default function LoginPage() {
     }
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleSendCode = async () => {
+    if (!regPhone) {
+      toast({ title: "请输入手机号", variant: "destructive" });
+      return;
+    }
+    setSendingCode(true);
+    try {
+      await api.post("/auth/sms/send", { phone: regPhone, purpose: "REGISTER" });
+      toast({ title: "验证码已发送", description: "当前为开发模式，注册暂不强制校验验证码" });
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message || "发送验证码失败";
+      toast({ title: "发送失败", description: msg, variant: "destructive" });
+    } finally {
+      setSendingCode(false);
+    }
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     if (regPassword !== regConfirm) {
       toast({ title: "密码不一致", description: "两次输入的密码不匹配", variant: "destructive" });
       return;
     }
-    toast({ title: "注册功能即将上线", description: "目前请使用已有账号登录" });
+    setRegLoading(true);
+    try {
+      await registerByPhone(regPhone, regPassword, regCode || undefined);
+      toast({ title: "注册成功", description: "已自动登录" });
+      router.push("/dashboard");
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message || "注册失败";
+      toast({ title: "注册失败", description: msg, variant: "destructive" });
+    } finally {
+      setRegLoading(false);
+    }
   };
 
   return (
@@ -103,14 +137,35 @@ export default function LoginPage() {
             /* Register Form */
             <form onSubmit={handleRegister} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="reg-username">用户名</Label>
+                <Label htmlFor="reg-phone">手机号</Label>
                 <Input
-                  id="reg-username"
-                  placeholder="请输入用户名"
-                  value={regUsername}
-                  onChange={(e) => setRegUsername(e.target.value)}
+                  id="reg-phone"
+                  placeholder="请输入手机号"
+                  value={regPhone}
+                  onChange={(e) => setRegPhone(e.target.value)}
                   className="h-12 rounded-lg border-border/60 bg-muted/30 focus:ring-1 focus:ring-ring"
                 />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="reg-code">验证码（预留）</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="reg-code"
+                    placeholder="请输入验证码"
+                    value={regCode}
+                    onChange={(e) => setRegCode(e.target.value)}
+                    className="h-12 rounded-lg border-border/60 bg-muted/30 focus:ring-1 focus:ring-ring"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-12 shrink-0"
+                    disabled={sendingCode || !regPhone}
+                    onClick={handleSendCode}
+                  >
+                    {sendingCode ? "发送中" : "发送验证码"}
+                  </Button>
+                </div>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="reg-password">密码</Label>
@@ -136,10 +191,11 @@ export default function LoginPage() {
               </div>
               <Button
                 type="submit"
-                disabled={!regUsername || !regPassword || !regConfirm}
+                disabled={regLoading || !regPhone || !regPassword || !regConfirm}
                 className="h-12 w-full bg-primary text-primary-foreground rounded-lg font-medium"
               >
-                注册
+                {regLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                {regLoading ? "注册中..." : "注册"}
               </Button>
               <div className="text-center">
                 <button
