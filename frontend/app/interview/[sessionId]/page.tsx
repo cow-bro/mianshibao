@@ -15,9 +15,9 @@ import type { ApiResponse } from "@/lib/types";
 
 const STAGE_LABELS: Record<string, string> = {
   WELCOME: "欢迎",
-  RESUME_QA: "简历挖掘",
+  RESUME_DIG: "简历挖掘",
   TECH_QA: "技术问答",
-  CANDIDATE_QA: "候选人提问",
+  CANDIDATE_QUESTION: "候选人提问",
   END: "结束",
 };
 
@@ -57,7 +57,7 @@ export default function InterviewChatPage() {
     shouldReconnect: () => !isInterviewEnded,
     reconnectAttempts: 5,
     reconnectInterval: 3000,
-    heartbeat: { message: JSON.stringify({ type: "PING" }), interval: 25000 },
+    heartbeat: { message: JSON.stringify({ type: "pong" }), interval: 25000 },
     onOpen: () => setConnected(true),
     onClose: () => setConnected(false),
   });
@@ -94,7 +94,13 @@ export default function InterviewChatPage() {
         setReportReady(true);
         break;
       case "error":
-        toast({ title: (msg.data as string) ?? "发生错误", variant: "destructive" });
+        toast({
+          title:
+            (typeof msg.data === "string"
+              ? msg.data
+              : (msg.data as { message?: string } | undefined)?.message) ?? "发生错误",
+          variant: "destructive",
+        });
         break;
       default:
         break;
@@ -135,6 +141,7 @@ export default function InterviewChatPage() {
   const handleEndInterview = useCallback(() => {
     if (ending) return;
     setEnding(true);
+    setStage("END");
 
     (async () => {
       try {
@@ -142,17 +149,9 @@ export default function InterviewChatPage() {
           sendJsonMessage({ type: "END_INTERVIEW", message: "结束面试" });
         }
 
-        const res = await api.post<
+        void api.post<
           ApiResponse<{ session_id: number; status: string; current_stage: string; report_ready: boolean }>
         >(`/interview/sessions/${sessionId}/end`);
-
-        const data = res.data.data;
-        if (data?.current_stage) {
-          setStage(data.current_stage);
-        }
-        if (data?.report_ready) {
-          setReportReady(true);
-        }
       } catch {
         toast({ title: "结束面试失败，请稍后重试", variant: "destructive" });
       } finally {
@@ -204,11 +203,15 @@ export default function InterviewChatPage() {
       </div>
 
       {/* Report overlay */}
-      {reportReady && (
+      {(reportReady || isInterviewEnded) && (
         <div className="absolute inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="rounded-xl border border-border/60 bg-card p-8 text-center space-y-4 shadow-lg">
             <p className="text-lg font-semibold">面试已结束</p>
-            <Button onClick={() => router.push(`/interview/report/${sessionId}`)}>查看报告</Button>
+            {reportReady ? (
+              <Button onClick={() => router.push(`/interview/report/${sessionId}`)}>查看报告</Button>
+            ) : (
+              <p className="text-sm text-muted-foreground">报告生成中，请稍候...</p>
+            )}
           </div>
         </div>
       )}

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +19,7 @@ from app.models.knowledge_learning_progress import KnowledgeLearningProgress, Le
 from app.models.knowledge_point import DifficultyLevel, KnowledgePoint, KnowledgePointType
 from app.models.position_knowledge import PositionKnowledge
 from app.providers.embedding import EmbeddingProvider
+from app.providers.cache import redis_client
 from app.providers.llm_factory import LLMService
 from app.providers.reranker import RerankerProvider
 from app.utils.prompt_manager import PromptManager
@@ -27,7 +31,13 @@ from app.utils.text_splitter import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class KnowledgeService:
+    SEARCH_CACHE_VERSION_KEY = "knowledge:search:version"
+    SEARCH_CACHE_KEY_PREFIX = "knowledge:search"
+
     def __init__(self) -> None:
         self.settings = get_settings()
         self.embedder = EmbeddingProvider()
@@ -107,6 +117,7 @@ class KnowledgeService:
                 )
 
         await db.commit()
+        self._bump_search_cache_version()
         return created_ids
 
     # ── 2. Hybrid search ──────────────────────────────────
@@ -121,6 +132,17 @@ class KnowledgeService:
         user_id: int | None = None,
     ) -> list[dict]:
         """Dual-path retrieval (vector + keyword), merge, rerank, return top-k."""
+        cache_key = self._build_search_cache_key(
+            query=query,
+            top_k=top_k,
+            scope=scope,
+            visibility=visibility,
+            user_id=user_id,
+        )
+        cached = self._get_cached_search_result(cache_key)
+        if cached is not None:
+            return cached[:top_k]
+
         query_embedding = self.embedder.embed(query)
 
         vector_results = await self._vector_search(
@@ -142,7 +164,9 @@ class KnowledgeService:
 
         merged = self._merge_results(vector_results, keyword_results)
         reranked = self._rerank(merged, query)
-        return reranked[:top_k]
+        top_results = reranked[:top_k]
+        self._set_cached_search_result(cache_key, top_results)
+        return top_results
 
     async def _vector_search(
         self,
@@ -710,6 +734,69 @@ class KnowledgeService:
             return LearningStatus((status or "UNREAD").upper())
         except Exception as exc:  # noqa: BLE001
             raise AppException("invalid learning status", code=3008) from exc
+
+    def _get_search_cache_version(self) -> str:
+        try:
+            version = redis_client.get(self.SEARCH_CACHE_VERSION_KEY)
+            if version:
+                return str(version)
+            redis_client.set(self.SEARCH_CACHE_VERSION_KEY, "1")
+            return "1"
+        except Exception:
+            logger.debug("redis unavailable when reading knowledge search cache version", exc_info=True)
+            return "0"
+
+    def _bump_search_cache_version(self) -> None:
+        try:
+            redis_client.incr(self.SEARCH_CACHE_VERSION_KEY)
+        except Exception:
+            logger.warning("redis unavailable when bumping knowledge search cache version", exc_info=True)
+
+    def _build_search_cache_key(
+        self,
+        *,
+        query: str,
+        top_k: int,
+        scope: str | None,
+        visibility: str,
+        user_id: int | None,
+    ) -> str:
+        version = self._get_search_cache_version()
+        payload = {
+            "query": query.strip(),
+            "top_k": int(top_k),
+            "scope": scope or "",
+            "visibility": (visibility or "PUBLIC").upper(),
+            "user_id": int(user_id) if user_id is not None else 0,
+            "v": version,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return f"{self.SEARCH_CACHE_KEY_PREFIX}:{digest}"
+
+    def _get_cached_search_result(self, cache_key: str) -> list[dict] | None:
+        try:
+            raw = redis_client.get(cache_key)
+            if not raw:
+                return None
+            payload = json.loads(raw)
+            if not isinstance(payload, list):
+                return None
+            return payload
+        except Exception:
+            logger.debug("redis unavailable when reading knowledge search cache", exc_info=True)
+            return None
+
+    def _set_cached_search_result(self, cache_key: str, value: list[dict]) -> None:
+        try:
+            redis_client.setex(
+                cache_key,
+                max(30, int(self.settings.knowledge_search_cache_ttl_seconds)),
+                json.dumps(value, ensure_ascii=False),
+            )
+        except Exception:
+            logger.debug("redis unavailable when writing knowledge search cache", exc_info=True)
 
     @staticmethod
     def _build_visibility_filters(visibility: str, user_id: int | None) -> tuple[list[str], dict]:

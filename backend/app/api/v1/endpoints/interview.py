@@ -72,7 +72,7 @@ async def end_interview_session(
             "session_id": session.id,
             "status": state["status"],
             "current_stage": state["current_stage"].value,
-            "report_ready": state["status"] == "ENDED",
+            "report_ready": isinstance(state.get("report"), dict),
         }
     )
 

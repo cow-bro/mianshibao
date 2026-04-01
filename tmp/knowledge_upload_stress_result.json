@@ -1,0 +1,98 @@
+{
+  "upload_results": [
+    {
+      "file": "Python 进阶核心知识解析.pdf",
+      "status_code": 200,
+      "elapsed_ms": 29009.08,
+      "ok": true,
+      "response": {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "ingested_count": 22,
+          "ids": [
+            79,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85,
+            86,
+            87,
+            88,
+            89,
+            90,
+            91,
+            92,
+            93,
+            95,
+            97,
+            99,
+            101,
+            103,
+            104,
+            106
+          ],
+          "source_file": "Python 进阶核心知识解析.pdf"
+        }
+      }
+    },
+    {
+      "file": "FastAPI：核心原理、代码实战.pdf",
+      "status_code": 200,
+      "elapsed_ms": 39981.25,
+      "ok": true,
+      "response": {
+        "code": 0,
+        "message": "success",
+        "data": {
+          "ingested_count": 20,
+          "ids": [
+            121,
+            122,
+            123,
+            124,
+            125,
+            126,
+            127,
+            128,
+            129,
+            130,
+            131,
+            132,
+            133,
+            134,
+            135,
+            136,
+            137,
+            138,
+            139,
+            140
+          ],
+          "source_file": "FastAPI：核心原理、代码实战.pdf"
+        }
+      }
+    }
+  ],
+  "stress": {
+    "total_requests": 120,
+    "concurrency": 12,
+    "wall_time_sec": 90.569,
+    "throughput_rps": 1.32,
+    "success_count": 120,
+    "success_rate": 1.0,
+    "status_counts": {
+      "200": 120
+    },
+    "latency_ms": {
+      "min": 7207.74,
+      "mean": 8755.22,
+      "p50": 8323.74,
+      "p95": 10484.74,
+      "p99": 13742.12,
+      "max": 14386.58
+    },
+    "sample_errors": []
+  }
+}

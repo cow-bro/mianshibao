@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { GraduationCap, Briefcase, LibraryBig } from "lucide-react";
+import { GraduationCap, Briefcase, LibraryBig, Search } from "lucide-react";
 
 const cards = [
   {
@@ -22,6 +22,12 @@ const cards = [
     icon: LibraryBig,
     href: "/knowledge/library",
   },
+  {
+    title: "知识智能查询",
+    description: "连接混合检索与缓存链路，快速定位答案",
+    icon: Search,
+    href: "/knowledge/query",
+  },
 ];
 
 export default function KnowledgePage() {
@@ -30,7 +36,7 @@ export default function KnowledgePage() {
   return (
     <div className="max-w-3xl mx-auto py-12 px-6 space-y-6">
       <h1 className="text-2xl font-semibold text-center mb-8">选择学习方向</h1>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
         {cards.map((c) => (
           <div
             key={c.href}

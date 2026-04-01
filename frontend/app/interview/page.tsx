@@ -95,10 +95,10 @@ export default function InterviewInitPage() {
       if (targetCompany) body.target_company = targetCompany;
       if (targetPosition) body.target_position = targetPosition;
       if (jobDescription) body.job_description = jobDescription;
-      body.max_questions = maxQuestions;
-      body.resume_dig_questions = resumeDigQuestions;
-      body.tech_questions = techQuestions;
-      body.max_duration_seconds = maxDuration;
+      body.max_total_questions = maxQuestions;
+      body.max_resume_dig_questions = resumeDigQuestions;
+      body.max_tech_qa_questions = techQuestions;
+      body.max_interview_duration = maxDuration;
 
       const res = await api.post<ApiResponse<SessionCreated>>("/interview/sessions", body);
       const sessionId = res.data.data.session_id;

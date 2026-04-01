@@ -1,4 +1,5 @@
 import pytest
+from uuid import uuid4
 
 from app.schemas.interview import InterviewStage
 from app.services.interview_graph import InterviewGraphService
@@ -31,7 +32,7 @@ async def test_welcome_turn_generates_opening_message():
     svc.knowledge_service = DummyKnowledgeService()
 
     state = svc.init_state(
-        session_id=1,
+        session_id=100000 + (uuid4().int % 100000),
         user_id=1,
         resume_id=1,
         target_company="测试公司",
@@ -57,7 +58,7 @@ async def test_ready_message_moves_to_resume_dig():
     svc.knowledge_service = DummyKnowledgeService()
 
     state = svc.init_state(
-        session_id=1,
+        session_id=200000 + (uuid4().int % 100000),
         user_id=1,
         resume_id=1,
         target_company="测试公司",
@@ -74,6 +75,12 @@ async def test_ready_message_moves_to_resume_dig():
     state["current_answer"] = "准备好了"
     state = await svc.run_turn(state, db=None)
 
+    assert state["current_stage"] == InterviewStage.WELCOME
+    assert "自我介绍" in state["message_history"][-1]["content"]
+
+    state["current_answer"] = "我是后端工程师，主要负责FastAPI和数据库优化。"
+    state = await svc.run_turn(state, db=None)
+
     assert state["current_stage"] == InterviewStage.RESUME_DIG
     assert state["resume_dig_question_count"] == 1
     assert state["current_question_index"] == 1
@@ -86,7 +93,7 @@ async def test_resume_limit_jumps_to_tech_qa():
     svc.knowledge_service = DummyKnowledgeService()
 
     state = svc.init_state(
-        session_id=1,
+        session_id=300000 + (uuid4().int % 100000),
         user_id=1,
         resume_id=1,
         target_company="测试公司",
@@ -101,6 +108,8 @@ async def test_resume_limit_jumps_to_tech_qa():
 
     state = await svc.run_turn(state, db=None)
     state["current_answer"] = "准备好了"
+    state = await svc.run_turn(state, db=None)
+    state["current_answer"] = "我主要做接口开发和性能优化。"
     state = await svc.run_turn(state, db=None)
 
     state["current_answer"] = "我主要负责接口开发"

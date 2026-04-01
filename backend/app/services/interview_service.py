@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -66,9 +67,24 @@ class InterviewService:
         db: AsyncSession,
         session: InterviewSession,
     ) -> InterviewState:
+        # On reconnect, prefer checkpoint restore to avoid serving stale in-memory cache.
+        if self.is_recently_disconnected(session.id):
+            checkpoint_state = self.graph.load_state_from_checkpoint(session.id)
+            if checkpoint_state is not None:
+                checkpoint_state.setdefault("_persisted_messages", len(checkpoint_state.get("message_history", [])))
+                self._state_cache[session.id] = checkpoint_state
+                self._disconnected_at.pop(session.id, None)
+                return checkpoint_state
+
         cached = self._state_cache.get(session.id)
         if cached is not None:
             return cached
+
+        checkpoint_state = self.graph.load_state_from_checkpoint(session.id)
+        if checkpoint_state is not None:
+            checkpoint_state.setdefault("_persisted_messages", len(checkpoint_state.get("message_history", [])))
+            self._state_cache[session.id] = checkpoint_state
+            return checkpoint_state
 
         parsed_resume: dict | None = None
         if session.resume_id:
@@ -91,9 +107,13 @@ class InterviewService:
             human_enabled=session.is_human_intervention_enabled,
         )
         state["created_at"] = session.created_at.isoformat()
+        state.setdefault("_persisted_messages", 0)
 
         self._state_cache[session.id] = state
         return state
+
+    def is_recently_disconnected(self, session_id: int) -> bool:
+        return session_id in self._disconnected_at
 
     async def ensure_welcome_turn(self, db: AsyncSession, session: InterviewSession) -> InterviewState:
         state = await self.load_or_init_state(db, session)
@@ -108,10 +128,11 @@ class InterviewService:
         db: AsyncSession,
         session: InterviewSession,
         message: str,
+        token_callback=None,
     ) -> InterviewState:
         state = await self.load_or_init_state(db, session)
         state["current_answer"] = message
-        state = await self.graph.run_turn(state, db)
+        state = await self.graph.run_turn(state, db, token_callback=token_callback)
         await self._persist_delta(db, session, state)
         return state
 
@@ -129,6 +150,19 @@ class InterviewService:
         state = await self.graph.run_turn(state, db)
         await self._persist_delta(db, session, state)
         return state
+
+    async def generate_report_for_session(
+        self,
+        db: AsyncSession,
+        session: InterviewSession,
+        state: InterviewState,
+    ) -> dict:
+        if isinstance(state.get("report"), dict):
+            return state["report"]
+
+        report = await asyncio.to_thread(self.graph.ensure_report, state)
+        await self._persist_delta(db, session, state)
+        return report
 
     async def _persist_delta(self, db: AsyncSession, session: InterviewSession, state: InterviewState) -> None:
         persisted_count = int(state.get("_persisted_messages", 0))

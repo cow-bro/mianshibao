@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     dashscope_api_key: str = ""
     resume_score_timeout_seconds: int = 90
     resume_score_max_chars: int = 7000
+    knowledge_search_cache_ttl_seconds: int = 180
+    langgraph_allow_inmemory_checkpointer: bool = True
+    langgraph_allow_inmemory_checkpointer_in_production: bool = False
 
     llm_scenario_configs: dict[str, dict[str, Any]] = Field(
         default_factory=lambda: {

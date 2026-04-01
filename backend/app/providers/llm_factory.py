@@ -25,6 +25,10 @@ class LLMService:
         provider = self.get_provider(scenario)
         return provider.chat(prompt)
 
+    def chat_stream(self, scenario: str, prompt: str):
+        provider = self.get_provider(scenario)
+        return provider.chat_stream(prompt)
+
 
 def get_llm_provider(scene: str = "DEFAULT") -> BaseLLMProvider:
     return LLMService().get_provider(scene)

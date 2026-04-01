@@ -30,14 +30,18 @@ interface AnswerScore {
 interface InterviewReport {
   target_company?: string;
   target_position?: string;
-  duration_seconds?: number;
+  interview_duration_seconds?: number;
   total_questions?: number;
   overall_score: number;
-  dimension_scores: Record<string, number>;
+  professional_knowledge_score?: number;
+  project_experience_score?: number;
+  logical_thinking_score?: number;
+  communication_score?: number;
+  position_match_score?: number;
   highlights: string[];
   weaknesses: string[];
-  suggestions: string[];
-  recommended_topics: string[];
+  improvement_suggestions: string[];
+  recommended_knowledge_points: Array<{ title?: string; id?: string; link?: string } | string>;
   answer_scores: AnswerScore[];
   interview_summary: string;
 }
@@ -75,10 +79,15 @@ export default function InterviewReportPage() {
 
   if (!report) return null;
 
-  const radarData = Object.entries(report.dimension_scores).map(([name, value]) => ({
-    dimension: name,
-    score: value,
-  }));
+  const dimensionScores: Record<string, number> = {
+    专业知识: Number(report.professional_knowledge_score ?? 0),
+    项目经验: Number(report.project_experience_score ?? 0),
+    逻辑思维: Number(report.logical_thinking_score ?? 0),
+    沟通表达: Number(report.communication_score ?? 0),
+    岗位匹配: Number(report.position_match_score ?? 0),
+  };
+
+  const radarData = Object.entries(dimensionScores).map(([name, value]) => ({ dimension: name, score: value }));
 
   const formatDuration = (s?: number) => {
     if (!s) return "-";
@@ -120,7 +129,7 @@ export default function InterviewReportPage() {
             )}
             <div>
               <span className="text-muted-foreground">面试时长</span>
-              <p className="font-medium">{formatDuration(report.duration_seconds)}</p>
+              <p className="font-medium">{formatDuration(report.interview_duration_seconds)}</p>
             </div>
             <div>
               <span className="text-muted-foreground">总题数</span>
@@ -155,7 +164,7 @@ export default function InterviewReportPage() {
         {/* ③ Dimension detail bars */}
         <div className="rounded-xl border border-border/60 bg-card p-6 space-y-4">
           <h3 className="text-lg font-medium">分项明细</h3>
-          {Object.entries(report.dimension_scores).map(([name, score]) => (
+          {Object.entries(dimensionScores).map(([name, score]) => (
             <div key={name} className="flex items-center gap-4">
               <span className="w-24 text-sm">{name}</span>
               <Progress value={score} className="flex-1" />
@@ -195,10 +204,10 @@ export default function InterviewReportPage() {
         </div>
 
         {/* ⑤ Suggestions */}
-        {report.suggestions.length > 0 && (
+        {report.improvement_suggestions.length > 0 && (
           <div className="space-y-3">
             <h3 className="text-lg font-medium">改进建议</h3>
-            {report.suggestions.map((s, i) => (
+            {report.improvement_suggestions.map((s, i) => (
               <div key={i} className="rounded-xl border border-border/60 bg-card p-4 flex gap-3">
                 <span className="flex-shrink-0 h-6 w-6 rounded-full bg-muted flex items-center justify-center text-xs font-medium">
                   {i + 1}
@@ -210,12 +219,12 @@ export default function InterviewReportPage() {
         )}
 
         {/* ⑥ Recommended topics */}
-        {report.recommended_topics.length > 0 && (
+        {report.recommended_knowledge_points.length > 0 && (
           <div>
             <h3 className="text-lg font-medium mb-3">推荐复习知识点</h3>
             <div className="flex flex-wrap gap-2">
-              {report.recommended_topics.map((t, i) => (
-                <Badge key={i} variant="secondary">{t}</Badge>
+              {report.recommended_knowledge_points.map((t, i) => (
+                <Badge key={i} variant="secondary">{typeof t === "string" ? t : t.title || t.id || "知识点"}</Badge>
               ))}
             </div>
           </div>

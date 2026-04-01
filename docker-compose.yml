@@ -78,7 +78,7 @@ services:
       minio:
         condition: service_started
     command: >
-      sh -c "alembic upgrade head && pytest -q tests/services/test_interview_graph.py"
+      sh -c "alembic upgrade head && pytest -q tests/services/test_interview_graph.py tests/services/test_interview_graph_langgraph_integration.py"
     profiles: ["test"]
 
   frontend:

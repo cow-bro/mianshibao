@@ -125,3 +125,5 @@ class InterviewState(TypedDict):
     report: NotRequired[dict]
     trace_id: NotRequired[str]
     _next_node: NotRequired[str]
+    _persisted_messages: NotRequired[int]
+    opening_intro_requested: NotRequired[bool]

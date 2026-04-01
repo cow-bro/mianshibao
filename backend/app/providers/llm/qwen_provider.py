@@ -36,8 +36,27 @@ class QwenProvider(BaseLLMProvider):
         return self._invoke(prompt)
 
     def chat_stream(self, prompt: str) -> Iterator[str]:
-        # DashScope SDK streaming can be wired later; expose iterator contract now.
-        response = self.chat(prompt)
-        chunk_size = 24
-        for i in range(0, len(response), chunk_size):
-            yield response[i : i + chunk_size]
+        if not self.settings.dashscope_api_key:
+            response = self.chat(prompt)
+            chunk_size = 16
+            for i in range(0, len(response), chunk_size):
+                yield response[i : i + chunk_size]
+            return
+
+        stream = Generation.call(
+            model=self.model,
+            api_key=self.settings.dashscope_api_key,
+            temperature=self.temperature,
+            result_format="message",
+            incremental_output=True,
+            stream=True,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        for event in stream:
+            try:
+                delta = event.output.choices[0].message.content
+            except Exception:
+                delta = ""
+            if delta:
+                yield str(delta)

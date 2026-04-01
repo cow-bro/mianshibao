@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+
+try:
+    from langgraph.graph import END, START, StateGraph
+
+    LANGGRAPH_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency safety
+    END = "__end__"  # type: ignore[assignment]
+    START = "__start__"  # type: ignore[assignment]
+    StateGraph = None  # type: ignore[assignment]
+    LANGGRAPH_AVAILABLE = False
 
 from app.providers.llm_factory import LLMService
 from app.providers.checkpointer import build_checkpointer
@@ -24,10 +35,89 @@ class InterviewGraphService:
         self.knowledge_service = KnowledgeService()
         self.checkpointer = build_checkpointer()
         self.prompt_manager = PromptManager()
+        self._runtime_db = None
+        self._token_callback = None
+        self.graph = self._build_graph()
 
     @staticmethod
     def now_iso() -> str:
         return datetime.now(UTC).isoformat()
+
+    @staticmethod
+    def _thread_id(session_id: str | int) -> str:
+        return f"interview-session-{session_id}"
+
+    def _config_for_state(self, state: InterviewState) -> dict[str, dict[str, str]]:
+        return {
+            "configurable": {
+                "thread_id": self._thread_id(state["session_id"]),
+            }
+        }
+
+    @staticmethod
+    def _supports_checkpointer(checkpointer: Any) -> bool:
+        sync_methods = ("get_tuple", "put", "put_writes")
+        async_methods = ("aget_tuple", "aput", "aput_writes")
+        return all(hasattr(checkpointer, method) for method in sync_methods) or all(
+            hasattr(checkpointer, method) for method in async_methods
+        )
+
+    def _build_graph(self):
+        if not LANGGRAPH_AVAILABLE or StateGraph is None:
+            logger.warning("LangGraph not available, using fallback state dispatcher")
+            return None
+
+        workflow = StateGraph(InterviewState)
+        workflow.add_node("route", self._route_node)
+        workflow.add_node("welcome", self._welcome_node)
+        workflow.add_node("resume_dig", self._resume_dig_node)
+        workflow.add_node("tech_qa", self._tech_qa_node)
+        workflow.add_node("candidate_question", self._candidate_question_node)
+        workflow.add_node("end", self._end_node)
+        workflow.add_node("human_waiting", self._human_waiting_node)
+
+        workflow.add_edge(START, "route")
+        workflow.add_conditional_edges(
+            "route",
+            self._route_selector,
+            {
+                "welcome": "welcome",
+                "resume_dig": "resume_dig",
+                "tech_qa": "tech_qa",
+                "candidate_question": "candidate_question",
+                "end": "end",
+                "human_waiting": "human_waiting",
+            },
+        )
+        workflow.add_edge("welcome", END)
+        workflow.add_edge("resume_dig", END)
+        workflow.add_edge("tech_qa", END)
+        workflow.add_edge("candidate_question", END)
+        workflow.add_edge("end", END)
+        workflow.add_edge("human_waiting", END)
+
+        compile_kwargs: dict[str, Any] = {}
+        if self._supports_checkpointer(self.checkpointer):
+            compile_kwargs["checkpointer"] = self.checkpointer
+        else:
+            logger.warning("LangGraph checkpointer unsupported, compiling without checkpointer")
+
+        return workflow.compile(**compile_kwargs)
+
+    def load_state_from_checkpoint(self, session_id: int) -> InterviewState | None:
+        if self.graph is None or not hasattr(self.graph, "get_state"):
+            return None
+
+        config = {"configurable": {"thread_id": self._thread_id(session_id)}}
+        try:
+            snapshot = self.graph.get_state(config)
+            values = getattr(snapshot, "values", None)
+            if not isinstance(values, dict) or not values:
+                return None
+            return self._normalize_state(values)
+        except Exception:
+            logger.exception("Failed to load checkpoint state for session_id=%s", session_id)
+            return None
 
     def init_state(
         self,
@@ -78,11 +168,31 @@ class InterviewGraphService:
             "created_at": now,
             "updated_at": now,
             "trace_id": uuid4().hex,
+            "_persisted_messages": 0,
         }
 
-    async def run_turn(self, state: InterviewState, db) -> InterviewState:
+    async def run_turn(self, state: InterviewState, db, token_callback=None) -> InterviewState:
+        state = self._normalize_state(state)
+        if self.graph is None:
+            return await self._run_turn_fallback(state, db, token_callback=token_callback)
+
+        config = self._config_for_state(state)
+        self._runtime_db = db
+        self._token_callback = token_callback
+        try:
+            result = await asyncio.to_thread(self.graph.invoke, state, config)
+            return self._normalize_state(result)
+        except Exception:
+            logger.exception("LangGraph invocation failed, fallback to local dispatcher")
+            return await self._run_turn_fallback(state, db, token_callback=token_callback)
+        finally:
+            self._runtime_db = None
+            self._token_callback = None
+
+    async def _run_turn_fallback(self, state: InterviewState, db, token_callback=None) -> InterviewState:
         state["updated_at"] = self.now_iso()
         state["interview_duration_seconds"] = self._calculate_duration_seconds(state)
+        self._token_callback = token_callback
 
         self._record_candidate_answer_if_needed(state)
 
@@ -98,12 +208,61 @@ class InterviewGraphService:
         if stage == InterviewStage.RESUME_DIG:
             return self._resume_dig_node(state)
         if stage == InterviewStage.TECH_QA:
-            return await self._tech_qa_node(state, db)
+            self._runtime_db = db
+            try:
+                return self._tech_qa_node(state)
+            finally:
+                self._runtime_db = None
+                self._token_callback = None
         if stage == InterviewStage.CANDIDATE_QUESTION:
             return self._candidate_question_node(state)
         if stage == InterviewStage.END:
             return self._end_node(state)
+        self._token_callback = None
         return state
+
+    def _route_node(self, state: InterviewState) -> InterviewState:
+        state["updated_at"] = self.now_iso()
+        state["interview_duration_seconds"] = self._calculate_duration_seconds(state)
+        self._record_candidate_answer_if_needed(state)
+
+        if self._is_end_signal(state.get("current_answer")):
+            state["current_stage"] = InterviewStage.END
+
+        if state["is_human_intervention_enabled"] and state.get("human_intervention_status") == InterviewStage.HUMAN_INTERVENTION_WAITING:
+            state["_next_node"] = "human_waiting"
+            return state
+
+        stage = state["current_stage"]
+        if stage == InterviewStage.WELCOME:
+            state["_next_node"] = "welcome"
+        elif stage == InterviewStage.RESUME_DIG:
+            state["_next_node"] = "resume_dig"
+        elif stage == InterviewStage.TECH_QA:
+            state["_next_node"] = "tech_qa"
+        elif stage == InterviewStage.CANDIDATE_QUESTION:
+            state["_next_node"] = "candidate_question"
+        else:
+            state["_next_node"] = "end"
+        return state
+
+    @staticmethod
+    def _route_selector(state: InterviewState) -> str:
+        next_node = str(state.get("_next_node") or "end")
+        if next_node in {"welcome", "resume_dig", "tech_qa", "candidate_question", "human_waiting", "end"}:
+            return next_node
+        return "end"
+
+    @staticmethod
+    def _normalize_state(state: dict[str, Any]) -> InterviewState:
+        normalized = dict(state)
+        current_stage = normalized.get("current_stage")
+        if isinstance(current_stage, str):
+            normalized["current_stage"] = InterviewStage(current_stage)
+        human_stage = normalized.get("human_intervention_status")
+        if isinstance(human_stage, str):
+            normalized["human_intervention_status"] = InterviewStage(human_stage)
+        return normalized  # type: ignore[return-value]
 
     def _welcome_node(self, state: InterviewState) -> InterviewState:
         if not state["message_history"]:
@@ -120,6 +279,18 @@ class InterviewGraphService:
             state["current_stage"] = InterviewStage.CANDIDATE_QUESTION
             msg = self._generate_candidate_question_response(state, candidate_input)
             self._append_interviewer_message(state, msg, InterviewStage.CANDIDATE_QUESTION)
+            return state
+
+        if not state.get("opening_intro_requested"):
+            if self._is_ready_signal(candidate_input):
+                state["opening_intro_requested"] = True
+                intro_request = "很好，我们正式开始。请先做一个1分钟左右的自我介绍，重点讲与你应聘岗位最相关的项目和技术栈。"
+                self._append_interviewer_message(state, intro_request, InterviewStage.WELCOME)
+                return state
+
+            state["opening_intro_requested"] = True
+            intro_request = "在进入正式提问前，请你先做一个简短自我介绍，突出与你应聘岗位最相关的经历。"
+            self._append_interviewer_message(state, intro_request, InterviewStage.WELCOME)
             return state
 
         state["current_stage"] = InterviewStage.RESUME_DIG
@@ -140,7 +311,7 @@ class InterviewGraphService:
         self._ask_resume_question(state)
         return state
 
-    async def _tech_qa_node(self, state: InterviewState, db) -> InterviewState:
+    def _tech_qa_node(self, state: InterviewState) -> InterviewState:
         if self._should_move_to_candidate_question(state):
             state["current_stage"] = InterviewStage.CANDIDATE_QUESTION
             return self._candidate_question_node(state)
@@ -160,7 +331,14 @@ class InterviewGraphService:
         )
 
         try:
-            rag = await self.knowledge_service.hybrid_search(db, query=query[:500], top_k=3)
+            db = self._runtime_db
+            rag = []
+            if db is not None:
+                try:
+                    asyncio.get_running_loop()
+                    logger.warning("Skip RAG retrieval in sync fallback path due active event loop")
+                except RuntimeError:
+                    rag = asyncio.run(self.knowledge_service.hybrid_search(db, query=query[:500], top_k=3))
         except Exception:
             logger.exception("RAG retrieval failed, falling back to JD-only prompt")
             rag = []
@@ -187,14 +365,17 @@ class InterviewGraphService:
         return state
 
     def _end_node(self, state: InterviewState) -> InterviewState:
-        if "report" not in state:
-            state["report"] = self._generate_report(state)
-
         state["status"] = "ENDED"
         if not state["message_history"] or state["message_history"][-1].get("stage") != InterviewStage.END.value:
             closing = "今天的模拟面试到这里，感谢你的认真作答。稍后我会给出完整复盘报告。"
             self._append_interviewer_message(state, closing, InterviewStage.END)
         return state
+
+    def ensure_report(self, state: InterviewState) -> dict[str, Any]:
+        if "report" in state and isinstance(state["report"], dict):
+            return state["report"]
+        state["report"] = self._generate_report(state)
+        return state["report"]
 
     def _human_waiting_node(self, state: InterviewState) -> InterviewState:
         text = "当前面试已暂停，正在等待人工面试官接入。"
@@ -235,7 +416,7 @@ class InterviewGraphService:
             max_resume_dig_questions=state["max_resume_dig_questions"],
         )
 
-        question = self.llm_service.chat("INTERVIEW", prompt)
+        question = self._chat_with_optional_stream("INTERVIEW", prompt)
         state["current_stage"] = InterviewStage.RESUME_DIG
         state["resume_dig_question_count"] += 1
         state["current_question_index"] += 1
@@ -277,7 +458,7 @@ RAG检索到的相关知识点：{{ rag_points_json }}
             rag_points_json=json.dumps(rag_points, ensure_ascii=False),
         )
 
-        question = self.llm_service.chat("INTERVIEW", prompt)
+        question = self._chat_with_optional_stream("INTERVIEW", prompt)
         state["current_stage"] = InterviewStage.TECH_QA
         state["tech_qa_question_count"] += 1
         state["current_question_index"] += 1
@@ -307,7 +488,7 @@ RAG检索到的相关知识点：{{ rag_points_json }}
             parsed_resume_json=json.dumps(state["parsed_resume"], ensure_ascii=False),
             job_description=state["job_description"],
         )
-        return self.llm_service.chat("INTERVIEW", prompt)
+        return self._chat_with_optional_stream("INTERVIEW", prompt)
 
     def _generate_candidate_question_response(self, state: InterviewState, candidate_input: str) -> str:
         prompt = self.prompt_manager.render_with_fallback(
@@ -330,7 +511,36 @@ RAG检索到的相关知识点：{{ rag_points_json }}
             candidate_input=candidate_input,
             job_description=state["job_description"],
         )
-        return self.llm_service.chat("INTERVIEW", prompt)
+        return self._chat_with_optional_stream("INTERVIEW", prompt)
+
+    def _chat_with_optional_stream(self, scenario: str, prompt: str) -> str:
+        callback = self._token_callback
+        get_provider = getattr(self.llm_service, "get_provider", None)
+        if not callable(get_provider):
+            return self.llm_service.chat(scenario, prompt)
+
+        provider = get_provider(scenario)
+        if callback is None:
+            return provider.chat(prompt)
+
+        chunks: list[str] = []
+        try:
+            for part in provider.chat_stream(prompt):
+                if not part:
+                    continue
+                chunks.append(part)
+                try:
+                    callback(part)
+                except Exception:
+                    logger.exception("token callback failed")
+        except Exception:
+            logger.exception("stream generation failed, fallback to non-stream chat")
+            return provider.chat(prompt)
+
+        merged = "".join(chunks).strip()
+        if merged:
+            return merged
+        return provider.chat(prompt)
 
     def _record_candidate_answer_if_needed(self, state: InterviewState) -> None:
         answer = (state.get("current_answer") or "").strip()
@@ -424,7 +634,11 @@ JSON字段必须满足 InterviewReport 模型。
             answer_quality_scores_json=json.dumps(state["answer_quality_scores"], ensure_ascii=False),
         )
 
-        raw = self.llm_service.chat("INTERVIEW", prompt)
+        try:
+            raw = self.llm_service.chat("INTERVIEW", prompt)
+        except Exception:
+            logger.exception("Report generation LLM call failed, using fallback report")
+            raw = ""
         try:
             parsed = json.loads(self._extract_json(raw))
             parsed.setdefault("generated_at", datetime.now(UTC).isoformat())
@@ -535,6 +749,13 @@ JSON字段必须满足 InterviewReport 模型。
             return False
         lowered = text.lower()
         return any(x in lowered for x in ["没有问题", "没问题了", "谢谢", "no question", "没有了"])
+
+    @staticmethod
+    def _is_ready_signal(text: str | None) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        return any(x in lowered for x in ["准备好了", "开始", "可以开始", "ready", "go", "开始吧"])
 
     @staticmethod
     def _looks_like_candidate_question(text: str) -> bool:
